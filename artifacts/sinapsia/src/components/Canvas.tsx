@@ -15,9 +15,10 @@ import {
 } from 'tldraw'
 import 'tldraw/tldraw.css'
 import { useLocation } from 'wouter'
-import { Check, Copy, Eye, Home, PenLine, Save, Share2, X } from 'lucide-react'
+import { Check, Copy, Eye, Home, Moon, PenLine, Save, Share2, Sun, X } from 'lucide-react'
 import { db, ref, set, update, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
+import { useDarkMode } from '@/hooks/useDarkMode'
 
 // ── Session identity (stable per browser tab) ────────────────────────────────
 const MY_SESSION = Math.random().toString(36).slice(2, 10)
@@ -26,7 +27,7 @@ const MY_COLOR = CURSOR_COLORS[parseInt(MY_SESSION.slice(0, 2), 36) % CURSOR_COL
 
 // ── Cloudinary upload ─────────────────────────────────────────────────────────
 const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'di3lqsxxc'
-const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'sinapsia_unsigned'
+const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'sinapisa'
 
 async function uploadToCloudinary(file: File): Promise<string> {
   const form = new FormData()
@@ -77,9 +78,12 @@ interface CanvasProps {
   onSaveRef?: React.MutableRefObject<(() => Promise<void>) | null>
 }
 
+// Record types that represent actual canvas content (shapes, pages, assets).
+// Changes to camera, selection, instance state, etc. are ignored for auto-save
+// to avoid burning Firebase writes on every cursor move or scroll.
+const CONTENT_TYPES = new Set(['shape', 'asset', 'page', 'bookmark'])
+
 // How long (ms) after the last local edit before remote snapshots can be applied.
-// Incoming remote snapshots are queued while the user draws and flushed once
-// they pause — preventing in-progress strokes from being interrupted.
 const LOCAL_GUARD_MS = 2000
 
 // ── ShareRow helper ───────────────────────────────────────────────────────────
@@ -90,17 +94,17 @@ function ShareRow({
   onCopy: () => void; copied: boolean
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 border-t border-neutral-100 py-3 first:border-t-0">
+    <div className="flex items-center justify-between gap-3 border-t border-neutral-100 dark:border-neutral-800 py-3 first:border-t-0">
       <div className="flex min-w-0 items-start gap-2">
         <span className="mt-0.5 text-[#0f766e]">{icon}</span>
         <div className="min-w-0">
-          <p className="text-sm font-semibold text-neutral-900">{label}</p>
-          <p className="text-xs leading-5 text-neutral-500">{description}</p>
+          <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">{label}</p>
+          <p className="text-xs leading-5 text-neutral-500 dark:text-neutral-400">{description}</p>
         </div>
       </div>
       <button
         onClick={onCopy}
-        className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-neutral-950 px-3 text-xs font-semibold text-white transition hover:bg-neutral-800"
+        className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-neutral-950 dark:bg-neutral-100 px-3 text-xs font-semibold text-white dark:text-neutral-950 transition hover:bg-neutral-800 dark:hover:bg-white"
       >
         <Copy size={14} />
         {copied ? 'Copiado!' : 'Copiar'}
@@ -117,9 +121,11 @@ interface OverlayProps {
   user: SinapUser | null
   saveState: 'idle' | 'saving' | 'saved'
   onManualSave: () => void
+  isDark: boolean
+  onThemeToggle: () => void
 }
 
-function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave }: OverlayProps) {
+function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave, isDark, onThemeToggle }: OverlayProps) {
   const [, navigate] = useLocation()
   const [showShare, setShowShare] = useState(false)
   const [copied, setCopied] = useState<'edit' | 'view' | null>(null)
@@ -139,11 +145,13 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
     saveState === 'saving' ? 'Salvando…' :
     saveState === 'saved'  ? 'Salvo!' : 'Salvar'
 
+  const btnCls = 'inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-3 text-xs font-semibold text-neutral-700 dark:text-neutral-300 shadow-sm backdrop-blur transition hover:bg-white dark:hover:bg-neutral-800'
+
   return createPortal(
     <>
       <div className="fixed right-2 top-2 z-[9000] flex items-center gap-1.5">
         <span
-          className="flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur"
+          className="flex items-center gap-1.5 rounded-full border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur"
           style={{ color: dot }}
         >
           <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot }} />
@@ -151,7 +159,7 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
         </span>
 
         {user && !readOnly && (
-          <span className="hidden items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2.5 py-1 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur sm:flex">
+          <span className="hidden items-center gap-1.5 rounded-full border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2.5 py-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 shadow-sm backdrop-blur sm:flex">
             <span className="inline-block h-2 w-2 rounded-full border border-white shadow-sm" style={{ backgroundColor: MY_COLOR }} />
             {user.name}
           </span>
@@ -161,9 +169,7 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
           <button
             onClick={onManualSave}
             disabled={saveState === 'saving'}
-            className={`inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold shadow-sm backdrop-blur transition hover:bg-white disabled:opacity-60 ${
-              saveState === 'saved' ? 'text-emerald-600' : 'text-neutral-700'
-            }`}
+            className={`${btnCls} disabled:opacity-60 ${saveState === 'saved' ? '!text-emerald-600' : ''}`}
           >
             {saveState === 'saved' ? <Check size={14} /> : <Save size={14} />}
             {saveLabel}
@@ -171,26 +177,29 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
         )}
 
         {readOnly && (
-          <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur">
+          <span className={btnCls}>
             <Eye size={15} />
             Visualização
           </span>
         )}
 
         {!readOnly && (
-          <button
-            onClick={() => setShowShare((v) => !v)}
-            className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-800 shadow-sm backdrop-blur transition hover:bg-white"
-          >
+          <button onClick={() => setShowShare((v) => !v)} className={btnCls}>
             <Share2 size={15} />
             Compartilhar
           </button>
         )}
 
+        {/* Theme toggle */}
         <button
-          onClick={() => navigate('/')}
-          className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
+          onClick={onThemeToggle}
+          className={`${btnCls} !px-2.5`}
+          title={isDark ? 'Mudar para claro' : 'Mudar para escuro'}
         >
+          {isDark ? <Sun size={15} /> : <Moon size={15} />}
+        </button>
+
+        <button onClick={() => navigate('/')} className={btnCls}>
           <Home size={15} />
           Início
         </button>
@@ -199,12 +208,12 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
       {showShare && (
         <>
           <div className="fixed inset-0 z-[9001] cursor-default" onClick={() => setShowShare(false)} />
-          <div className="fixed right-2 top-[52px] z-[9002] w-80 rounded-xl border border-neutral-200 bg-white p-3 shadow-2xl">
+          <div className="fixed right-2 top-[52px] z-[9002] w-80 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 p-3 shadow-2xl">
             <div className="mb-1 flex items-center justify-between">
-              <p className="text-sm font-semibold text-neutral-900">Links do mapa</p>
+              <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">Links do mapa</p>
               <button
                 onClick={() => setShowShare(false)}
-                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
+                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-900 dark:hover:text-neutral-100"
               >
                 <X size={15} />
               </button>
@@ -233,14 +242,12 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
 
 // ── Canvas component ──────────────────────────────────────────────────────────
 export default function Canvas({ boardId, readOnly = false, user = null }: CanvasProps) {
+  const { isDark, toggle: toggleTheme } = useDarkMode()
+
   const editorRef = useRef<Editor | null>(null)
   const isApplyingRemoteRef = useRef(false)
-  // Blocks writes until the initial Firebase load completes
   const initializedRef = useRef(false)
-  // Tracks IDs of records recently touched by THIS user (id → timestamp)
   const localTouchedRef = useRef<Map<string, number>>(new Map())
-  // Holds the latest remote snapshot that arrived while the user was drawing;
-  // flushed to the canvas by the idle-flush timer once the user pauses
   const pendingRemoteSnapRef = useRef<Partial<TLEditorSnapshot> | null>(null)
 
   const [editorReady, setEditorReady] = useState(false)
@@ -254,7 +261,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
 
   useEffect(() => { userNameRef.current = user?.name || 'Anônimo' }, [user])
 
-  // Periodically evict old entries from localTouchedRef
+  // Evict stale localTouched entries periodically
   useEffect(() => {
     const timer = setInterval(() => {
       const cutoff = Date.now() - LOCAL_GUARD_MS * 5
@@ -281,9 +288,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     return Object.values(records).filter((r: any) => r?.typeName === 'shape').length
   }
 
-  // ── Full snapshot replace (safe — uses tldraw's own loadSnapshot API) ─────
-  // Used for: initial board load, and real-time remote updates when the
-  // user is idle (no edits in the last LOCAL_GUARD_MS).
+  // ── Full snapshot replace (safe) ──────────────────────────────────────────
   const applyRemoteSnapshot = useCallback((editor: Editor, snap: Partial<TLEditorSnapshot>) => {
     const shapeCount = countShapes(snap)
     console.log('[Sinapsia] applyRemoteSnapshot', { boardId, shapeCount })
@@ -301,14 +306,8 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   }, [boardId])
 
   // ── Deferred remote merge ─────────────────────────────────────────────────
-  // When a remote update arrives via onValue:
-  //   • User is IDLE  → apply immediately with the safe loadSnapshot
-  //   • User is DRAWING → stash in pendingRemoteSnapRef; idle-flush timer
-  //     (below) applies it once the user pauses for LOCAL_GUARD_MS
-  //
-  // This strategy avoids calling editor.store.put() directly, which causes
-  // "AtomMap: key [object Object] not found" errors in tldraw v5 when used
-  // outside the framework's expected mutation paths.
+  // When user is drawing → queue; idle-flush timer applies it once they pause.
+  // Avoids calling editor.store.put() directly (causes AtomMap errors in tldraw v5).
   const applyRemoteMerge = useCallback((editor: Editor, remoteSnap: Partial<TLEditorSnapshot>) => {
     const now = Date.now()
     const isDrawing = [...localTouchedRef.current.values()].some(ts => now - ts < LOCAL_GUARD_MS)
@@ -324,9 +323,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   }, [boardId, applyRemoteSnapshot])
 
   // ── Idle-flush timer ──────────────────────────────────────────────────────
-  // Every 500ms, check if the user has paused. If yes and there is a pending
-  // remote snapshot, apply it now. This ensures remote changes always land
-  // within ~LOCAL_GUARD_MS + 500ms of the user stopping.
   useEffect(() => {
     if (!editorReady) return
     const timer = setInterval(() => {
@@ -336,7 +332,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       if (isDrawing) return
       const snap = pendingRemoteSnapRef.current
       pendingRemoteSnapRef.current = null
-      console.log('[Sinapsia] idle-flush: applying deferred remote snapshot', { boardId, shapeCount: countShapes(snap) })
+      console.log('[Sinapsia] idle-flush: applying deferred snapshot', { boardId, shapeCount: countShapes(snap) })
       applyRemoteSnapshot(editorRef.current!, snap)
     }, 500)
     return () => clearInterval(timer)
@@ -346,7 +342,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const writeToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
     if (!db || readOnly) {
       setSaveState('idle')
-      console.log('[Sinapsia] writeToFirebase skipped', { boardId, readOnly, dbConnected: Boolean(db) })
       return
     }
     const serialized = serializeSnap(snap)
@@ -373,21 +368,15 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
 
   // ── Manual save ───────────────────────────────────────────────────────────
   const handleManualSave = useCallback(async () => {
-    if (!editorRef.current || !db || readOnly || saveState === 'saving') {
-      console.log('[Sinapsia] handleManualSave skipped', { boardId, editorReady: Boolean(editorRef.current), dbConnected: Boolean(db), readOnly, saveState })
-      return
-    }
-    console.log('[Sinapsia] handleManualSave starting', { boardId, session: MY_SESSION })
+    if (!editorRef.current || !db || readOnly || saveState === 'saving') return
     setSaveState('saving')
     try {
       const snap = getSnapshot(editorRef.current.store)
-      const shapeCount = countShapes(snap)
       await update(ref(db, `boards/${boardId}`), {
         document_state: serializeSnap(snap),
         last_saved_by: MY_SESSION,
         updated_at: serverTimestamp(),
       })
-      console.log('[Sinapsia] handleManualSave succeeded', { boardId, shapeCount })
       setSync('Online')
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2200)
@@ -406,7 +395,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     if (readOnly) editor.updateInstanceState({ isReadonly: true })
 
     if (db) {
-      console.log('[Sinapsia] Firebase initial load starting', { boardId })
       get(ref(db, `boards/${boardId}`))
         .then(async (fbSnap) => {
           const data = fbSnap.val()
@@ -416,18 +404,15 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
           const localShapeCount = countShapes(local)
 
           console.log('[Sinapsia] Firebase initial load result', {
-            boardId, hasRemote: Boolean(remote), remoteShapeCount,
-            localShapeCount, lastSavedBy: data?.last_saved_by, updatedAt: data?.updated_at,
+            boardId, hasRemote: Boolean(remote), remoteShapeCount, localShapeCount,
+            lastSavedBy: data?.last_saved_by, updatedAt: data?.updated_at,
           })
 
           if (!remote || remoteShapeCount === 0) {
-            console.log('[Sinapsia] Firebase initial load: no remote content', { boardId })
             setSync('Online')
           } else if (!readOnly && localShapeCount > remoteShapeCount) {
-            console.log('[Sinapsia] Firebase initial load: local is newer, pushing', { boardId, localShapeCount, remoteShapeCount })
             await writeToFirebaseRef.current?.(local)
           } else {
-            console.log('[Sinapsia] Firebase initial load: applying remote', { boardId, remoteShapeCount })
             applyRemoteSnapshot(editor, remote)
           }
         })
@@ -436,7 +421,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
           setSync('Local')
         })
         .finally(() => {
-          console.log('[Sinapsia] Firebase initial load complete — writes unblocked', { boardId })
           initializedRef.current = true
         })
     } else {
@@ -444,31 +428,36 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     }
 
     if (!readOnly) {
+      // Debounce at 1.5s — only fires on actual content changes (shapes/assets/pages),
+      // not on camera pan, zoom, cursor moves, or selection changes.
       const debouncedWrite = debounce(() => {
         const currentEditor = editorRef.current
-        if (!currentEditor) return
-        if (!initializedRef.current) {
-          console.log('[Sinapsia] debouncedWrite blocked — not yet initialized', { boardId })
-          return
-        }
+        if (!currentEditor || !initializedRef.current) return
         writeToFirebaseRef.current?.(getSnapshot(currentEditor.store))
-      }, 400)
+      }, 1500)
 
       editor.store.listen((change) => {
         if (isApplyingRemoteRef.current) return
         if (!initializedRef.current) return
 
-        // Track which records the local user just modified
+        // Collect all changed records
+        const allChanged = [
+          ...Object.values(change.changes.added ?? {}),
+          ...Object.values(change.changes.updated ?? {}).map((e: any) => Array.isArray(e) ? e[1] : e),
+          ...Object.values(change.changes.removed ?? {}),
+        ]
+
+        // Track shape touches for collaborative merge protection
         const now = Date.now()
-        for (const record of Object.values(change.changes.added ?? {})) {
-          const id = (record as any)?.id
-          if (id) localTouchedRef.current.set(id, now)
+        for (const r of allChanged) {
+          const id = (r as any)?.id
+          if (id && (r as any)?.typeName === 'shape') localTouchedRef.current.set(id, now)
         }
-        for (const entry of Object.values(change.changes.updated ?? {})) {
-          const to = Array.isArray(entry) ? entry[1] : entry
-          const id = (to as any)?.id
-          if (id) localTouchedRef.current.set(id, now)
-        }
+
+        // Only write to Firebase when shapes, pages, or assets actually changed.
+        // Camera, selection, instance state changes are ignored.
+        const hasContentChange = allChanged.some((r: any) => CONTENT_TYPES.has(r?.typeName))
+        if (!hasContentChange) return
 
         setSaveState('saving')
         debouncedWrite()
@@ -567,6 +556,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         onMount={handleMount}
         assets={assetStore}
         persistenceKey={`sinapsia-${boardId}`}
+        darkMode={isDark}
       />
 
       <CanvasOverlay
@@ -576,6 +566,8 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         user={user}
         saveState={saveState}
         onManualSave={handleManualSave}
+        isDark={isDark}
+        onThemeToggle={toggleTheme}
       />
 
       {cursorElements}

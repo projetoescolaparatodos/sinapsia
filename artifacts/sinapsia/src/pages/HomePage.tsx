@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { ArrowRight, Check, Clock, LogOut, Network, Pencil, Plus } from 'lucide-react'
+import { ArrowRight, Check, Clock, LogOut, Moon, Network, Pencil, Plus, Sun } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { db, ref, set, onValue, off, serverTimestamp } from '@/lib/firebase'
 import { getStoredUser, clearStoredUser } from '@/lib/auth'
 import type { SinapUser } from '@/lib/auth'
 import AuthModal from '@/components/AuthModal'
+import { useDarkMode } from '@/hooks/useDarkMode'
 
 interface BoardEntry {
   id: string
@@ -21,6 +22,8 @@ export default function HomePage() {
   const [boardInput, setBoardInput] = useState('')
   const [inputError, setInputError] = useState(false)
   const [creating, setCreating] = useState(false)
+
+  const { isDark, toggle: toggleTheme } = useDarkMode()
 
   // Rename state
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -132,39 +135,50 @@ export default function HomePage() {
     <>
       {showAuth && <AuthModal onSuccess={handleAuthSuccess} />}
 
-      <main className="min-h-screen bg-[#f7f8fa] text-neutral-950">
+      <main className="min-h-screen bg-[#f7f8fa] dark:bg-neutral-950 text-neutral-950 dark:text-neutral-50">
         <div className="mx-auto max-w-5xl px-5 py-6 sm:px-8">
 
           {/* ── Header ── */}
           <header className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-neutral-950 text-white">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-neutral-950 dark:bg-white text-white dark:text-neutral-950">
                 <Network size={20} />
               </div>
               <span className="text-base font-semibold">Sinapsia</span>
             </div>
 
-            {user && (
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-neutral-600">
-                  Olá, <strong className="text-neutral-900">{user.name}</strong>
-                </span>
-                <button
-                  onClick={logout}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-neutral-500 transition hover:bg-neutral-200 hover:text-neutral-800"
-                >
-                  <LogOut size={14} />
-                  Sair
-                </button>
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              {/* Theme toggle */}
+              <button
+                onClick={toggleTheme}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-neutral-500 dark:text-neutral-400 transition hover:bg-neutral-200 dark:hover:bg-neutral-800 hover:text-neutral-800 dark:hover:text-neutral-200"
+                title={isDark ? 'Mudar para claro' : 'Mudar para escuro'}
+              >
+                {isDark ? <Sun size={17} /> : <Moon size={17} />}
+              </button>
+
+              {user && (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-neutral-600 dark:text-neutral-400">
+                    Olá, <strong className="text-neutral-900 dark:text-neutral-100">{user.name}</strong>
+                  </span>
+                  <button
+                    onClick={logout}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-neutral-500 dark:text-neutral-400 transition hover:bg-neutral-200 dark:hover:bg-neutral-800 hover:text-neutral-800 dark:hover:text-neutral-200"
+                  >
+                    <LogOut size={14} />
+                    Sair
+                  </button>
+                </div>
+              )}
+            </div>
           </header>
 
           {/* ── Title + actions ── */}
           <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h1 className="text-3xl font-bold tracking-tight">Meus mapas</h1>
-              <p className="mt-1 text-sm text-neutral-500">Clique duas vezes no título de um mapa para renomear.</p>
+              <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">Clique duas vezes no título de um mapa para renomear.</p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -173,14 +187,16 @@ export default function HomePage() {
                   value={boardInput}
                   onChange={(e) => { setBoardInput(e.target.value); setInputError(false) }}
                   onKeyDown={(e) => { if (e.key === 'Enter') openBoard() }}
-                  placeholder="Colar link ou ID"
-                  className={`h-10 w-44 rounded-lg border px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950 ${
-                    inputError ? 'border-red-400 bg-red-50' : 'border-neutral-300 bg-white'
+                  placeholder="Colar link ou ID completo"
+                  className={`h-10 w-44 rounded-lg border px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950 dark:focus:border-neutral-100 dark:bg-neutral-900 dark:text-neutral-100 ${
+                    inputError
+                      ? 'border-red-400 bg-red-50 dark:bg-red-950/30'
+                      : 'border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900'
                   }`}
                 />
                 <button
                   onClick={openBoard}
-                  className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-neutral-300 bg-white px-3 text-sm font-medium text-neutral-700 transition hover:border-neutral-400"
+                  className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 text-sm font-medium text-neutral-700 dark:text-neutral-300 transition hover:border-neutral-400 dark:hover:border-neutral-500"
                 >
                   <ArrowRight size={16} />
                   Abrir
@@ -190,7 +206,7 @@ export default function HomePage() {
               <button
                 onClick={createNewBoard}
                 disabled={creating}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-neutral-950 px-4 text-sm font-semibold text-white transition hover:bg-neutral-800 disabled:opacity-60"
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-neutral-950 dark:bg-white px-4 text-sm font-semibold text-white dark:text-neutral-950 transition hover:bg-neutral-800 dark:hover:bg-neutral-100 disabled:opacity-60"
               >
                 <Plus size={18} />
                 {creating ? 'Criando…' : 'Novo mapa'}
@@ -203,11 +219,11 @@ export default function HomePage() {
             {boards.map((board) => (
               <div
                 key={board.id}
-                className="group relative flex flex-col items-start rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition hover:border-neutral-400 hover:shadow-md"
+                className="group relative flex flex-col items-start rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4 shadow-sm transition hover:border-neutral-400 dark:hover:border-neutral-600 hover:shadow-md"
               >
                 {/* Canvas preview icon */}
                 <div
-                  className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg bg-neutral-100 text-neutral-400 transition group-hover:bg-neutral-200"
+                  className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg bg-neutral-100 dark:bg-neutral-800 text-neutral-400 dark:text-neutral-500 transition group-hover:bg-neutral-200 dark:group-hover:bg-neutral-700"
                   onClick={() => navigate(`/b/${board.id}`)}
                 >
                   <Network size={20} />
@@ -226,7 +242,7 @@ export default function HomePage() {
                           if (e.key === 'Enter') commitRename()
                           if (e.key === 'Escape') cancelRename()
                         }}
-                        className="w-full rounded border border-neutral-300 px-1.5 py-0.5 text-sm font-semibold text-neutral-900 outline-none focus:border-neutral-950"
+                        className="w-full rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-1.5 py-0.5 text-sm font-semibold text-neutral-900 dark:text-neutral-100 outline-none focus:border-neutral-950 dark:focus:border-neutral-100"
                         disabled={savingTitle}
                         maxLength={48}
                         onClick={(e) => e.stopPropagation()}
@@ -235,7 +251,7 @@ export default function HomePage() {
                     </div>
                   ) : (
                     <p
-                      className="cursor-pointer text-sm font-semibold leading-snug text-neutral-900"
+                      className="cursor-pointer text-sm font-semibold leading-snug text-neutral-900 dark:text-neutral-100"
                       onClick={() => navigate(`/b/${board.id}`)}
                       onDoubleClick={(e) => startRename(board, e)}
                       title="Clique duas vezes para renomear"
@@ -248,7 +264,7 @@ export default function HomePage() {
                 {/* Date + rename icon */}
                 <div className="mt-0.5 flex w-full items-center justify-between">
                   <p
-                    className="flex cursor-pointer items-center gap-1 text-xs text-neutral-400"
+                    className="flex cursor-pointer items-center gap-1 text-xs text-neutral-400 dark:text-neutral-500"
                     onClick={() => navigate(`/b/${board.id}`)}
                   >
                     <Clock size={11} />
@@ -257,7 +273,7 @@ export default function HomePage() {
                   {editingId !== board.id && (
                     <button
                       onClick={(e) => startRename(board, e)}
-                      className="invisible flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-700 group-hover:visible"
+                      className="invisible flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-700 dark:hover:text-neutral-300 group-hover:visible"
                       title="Renomear"
                     >
                       <Pencil size={12} />
@@ -271,21 +287,21 @@ export default function HomePage() {
             <button
               onClick={createNewBoard}
               disabled={creating}
-              className="flex flex-col items-start rounded-xl border-2 border-dashed border-neutral-300 p-4 text-left transition hover:border-neutral-400 hover:bg-white disabled:opacity-50"
+              className="flex flex-col items-start rounded-xl border-2 border-dashed border-neutral-300 dark:border-neutral-700 p-4 text-left transition hover:border-neutral-400 dark:hover:border-neutral-500 hover:bg-white dark:hover:bg-neutral-900 disabled:opacity-50"
             >
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-neutral-100 text-neutral-400">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-neutral-100 dark:bg-neutral-800 text-neutral-400 dark:text-neutral-500">
                 <Plus size={20} />
               </div>
-              <p className="mt-3 text-sm font-semibold text-neutral-500">
+              <p className="mt-3 text-sm font-semibold text-neutral-500 dark:text-neutral-400">
                 {creating ? 'Criando…' : 'Novo mapa'}
               </p>
             </button>
           </div>
 
           {boards.length === 0 && !creating && user && (
-            <p className="mt-16 text-center text-sm text-neutral-400">
+            <p className="mt-16 text-center text-sm text-neutral-400 dark:text-neutral-500">
               Nenhum mapa ainda — clique em{' '}
-              <strong className="text-neutral-600">Novo mapa</strong> para começar.
+              <strong className="text-neutral-600 dark:text-neutral-300">Novo mapa</strong> para começar.
             </p>
           )}
         </div>
