@@ -16,7 +16,7 @@ import {
 import 'tldraw/tldraw.css'
 import { useLocation } from 'wouter'
 import { Check, Copy, Eye, Home, PenLine, Save, Share2, X } from 'lucide-react'
-import { db, ref, set, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
+import { db, ref, set, update, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
 
 // ── Session identity (stable per browser tab) ────────────────────────────────
@@ -237,7 +237,7 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
 export default function Canvas({ boardId, readOnly = false, user = null }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
   const [editorReady, setEditorReady] = useState(false)
-  const debouncedSaveRef = useRef<((snap: TLEditorSnapshot) => void) | null>(null)
+  const writeToFirebaseRef = useRef<((snap: TLEditorSnapshot) => Promise<void>) | null>(null)
   const throttledCursorRef = useRef<((x: number, y: number) => void) | null>(null)
   const userNameRef = useRef<string>(user?.name || 'Anônimo')
   const lastLocalEditRef = useRef<number>(0)
@@ -250,23 +250,39 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     userNameRef.current = user?.name || 'Anônimo'
   }, [user])
 
-  // ── Save to Firebase ─────────────────────────────────────────────────────
-  const saveToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
+  // ── Helpers: serialise/deserialise snapshot ──────────────────────────────
+  // Store as JSON string to avoid Firebase nested-key restrictions
+  // (tldraw record IDs like "shape:uuid", "page:uuid" are fine as values but
+  //  can cause silent failures as Firebase object keys in some SDK versions)
+  const serializeSnap = (snap: TLEditorSnapshot): string =>
+    JSON.stringify(snap)
+
+  const deserializeSnap = (raw: unknown): Partial<TLEditorSnapshot> | null => {
+    if (!raw) return null
+    try {
+      return typeof raw === 'string' ? JSON.parse(raw) : (raw as Partial<TLEditorSnapshot>)
+    } catch { return null }
+  }
+
+  // ── Write to Firebase ────────────────────────────────────────────────────
+  // Uses update() (not set()) so created_by/created_at metadata is preserved
+  const writeToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
     if (!db || readOnly) return
     try {
-      await set(ref(db, `boards/${boardId}`), {
-        document_state: snap,
+      await update(ref(db, `boards/${boardId}`), {
+        document_state: serializeSnap(snap),
         last_saved_by: MY_SESSION,
         updated_at: serverTimestamp(),
       })
       setSync('Online')
-    } catch { setSync('Local') }
+    } catch (err) {
+      console.error('[Sinapsia] Firebase write failed:', err)
+      setSync('Local')
+    }
   }, [boardId, readOnly])
 
-  useEffect(() => {
-    debouncedSaveRef.current = debounce(saveToFirebase, 300)
-    return () => { debouncedSaveRef.current = null }
-  }, [saveToFirebase])
+  // Keep ref always pointing to latest (avoids stale closure in handleMount)
+  useEffect(() => { writeToFirebaseRef.current = writeToFirebase }, [writeToFirebase])
 
   // ── Manual save ──────────────────────────────────────────────────────────
   const handleManualSave = useCallback(async () => {
@@ -274,15 +290,16 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     setSaveState('saving')
     try {
       const snap = getSnapshot(editorRef.current.store)
-      await set(ref(db, `boards/${boardId}`), {
-        document_state: snap,
+      await update(ref(db, `boards/${boardId}`), {
+        document_state: serializeSnap(snap),
         last_saved_by: MY_SESSION,
         updated_at: serverTimestamp(),
       })
       setSync('Online')
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2200)
-    } catch {
+    } catch (err) {
+      console.error('[Sinapsia] Manual save failed:', err)
       setSync('Local')
       setSaveState('idle')
     }
@@ -296,10 +313,11 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       editor.updateInstanceState({ isReadonly: true })
       if (db) {
         get(ref(db, `boards/${boardId}`))
-          .then((snap) => {
-            const data = snap.val()
-            if (data?.document_state) {
-              try { loadSnapshot(editor.store, data.document_state as Partial<TLEditorSnapshot>) } catch { /* ok */ }
+          .then((fbSnap) => {
+            const data = fbSnap.val()
+            const parsed = deserializeSnap(data?.document_state)
+            if (parsed) {
+              try { loadSnapshot(editor.store, parsed) } catch { /* ok */ }
             }
             setSync('Online')
           })
@@ -308,11 +326,18 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     }
 
     if (!readOnly) {
+      // Debounce created HERE (inside handleMount) to guarantee it's ready
+      // before any store change fires — eliminates the useEffect timing race.
+      // No `scope` filter: tldraw v5 may not honour `scope:'document'` for
+      // all change types, which caused the listener to silently never fire.
+      const debouncedWrite = debounce((snap: TLEditorSnapshot) => {
+        writeToFirebaseRef.current?.(snap)
+      }, 400)
+
       editor.store.listen(() => {
         lastLocalEditRef.current = Date.now()
-        const snap = getSnapshot(editor.store)
-        debouncedSaveRef.current?.(snap)
-      }, { source: 'user', scope: 'document' })
+        debouncedWrite(getSnapshot(editor.store))
+      }, { source: 'user' })
     }
 
     throttledCursorRef.current = throttle((x: number, y: number) => {
@@ -342,11 +367,16 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       if (!data?.document_state) { setSync('Online'); return }
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
       if (!readOnly && Date.now() - lastLocalEditRef.current < 1500) { setSync('Online'); return }
+      const parsed = deserializeSnap(data.document_state)
+      if (!parsed) { setSync('Online'); return }
       try {
-        loadSnapshot(editorRef.current!.store, data.document_state as Partial<TLEditorSnapshot>)
+        loadSnapshot(editorRef.current!.store, parsed)
         setSync('Online')
-      } catch { setSync('Local') }
-    }, () => setSync('Local'))
+      } catch (err) {
+        console.error('[Sinapsia] loadSnapshot failed:', err)
+        setSync('Local')
+      }
+    }, (err) => { console.error('[Sinapsia] onValue error:', err); setSync('Local') })
 
     return () => off(boardRef)
   }, [editorReady, boardId, readOnly])

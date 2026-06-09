@@ -3,6 +3,7 @@ import {
   getDatabase,
   ref,
   set,
+  update,
   get,
   onValue,
   off,
@@ -45,4 +46,4 @@ if (isFirebaseConfigured) {
   }
 }
 
-export { db, ref, set, get, onValue, off, onDisconnect, serverTimestamp }
+export { db, ref, set, update, get, onValue, off, onDisconnect, serverTimestamp }
