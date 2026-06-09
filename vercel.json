@@ -1,7 +1,14 @@
 {
-  "buildCommand": "pnpm --filter @workspace/sinapsia build",
-  "outputDirectory": "artifacts/sinapsia/dist/public",
+  "version": 2,
+  "builds": [
+    {
+      "src": "artifacts/sinapsia/package.json",
+      "use": "@vercel/static-build",
+      "config": { "distDir": "dist/public" }
+    }
+  ],
   "installCommand": "pnpm install",
+  "buildCommand": "pnpm --filter @workspace/sinapsia build",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ],
