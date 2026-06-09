@@ -1,11 +1,10 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   type Editor,
   type TLEditorSnapshot,
@@ -16,7 +15,7 @@ import {
 } from 'tldraw'
 import 'tldraw/tldraw.css'
 import { useLocation } from 'wouter'
-import { Copy, Eye, Home, PenLine, Share2, X } from 'lucide-react'
+import { Check, Copy, Eye, Home, PenLine, Save, Share2, X } from 'lucide-react'
 import { db, ref, set, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
 
@@ -63,137 +62,14 @@ function throttle<T extends (...args: Parameters<T>) => void>(fn: T, ms: number)
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface CursorData { x: number; y: number; color: string; ts: number; name?: string }
-interface CanvasProps { boardId: string; readOnly?: boolean; user?: SinapUser | null }
-
-// ── SharePanel context ── defined OUTSIDE Canvas for stable reference ─────────
-interface ShareCtxValue {
+interface CanvasProps {
   boardId: string
-  readOnly: boolean
-  sync: string
-  user: SinapUser | null
-}
-const ShareCtx = createContext<ShareCtxValue>({
-  boardId: '', readOnly: false, sync: 'Local', user: null,
-})
-
-// Inline share panel — full dropdown logic, stable state
-function SharePanelInner({ boardId, readOnly, sync, user }: ShareCtxValue) {
-  const [, navigate] = useLocation()
-  const [showShare, setShowShare] = useState(false)
-  const [copied, setCopied] = useState<'edit' | 'view' | null>(null)
-
-  const copyLink = async (type: 'edit' | 'view') => {
-    const link = type === 'edit'
-      ? `${window.location.origin}/b/${boardId}`
-      : `${window.location.origin}/b/${boardId}?mode=view`
-    await navigator.clipboard.writeText(link)
-    setCopied(type)
-    setTimeout(() => setCopied(null), 1600)
-  }
-
-  const dot = sync === 'Online' ? '#0ca678' : sync === 'Local' ? '#868e96' : '#adb5bd'
-
-  return (
-    <div className="flex items-center gap-2 px-2 py-1.5">
-      {/* Sync badge */}
-      <span
-        className="flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2 py-0.5 text-xs font-semibold shadow-sm backdrop-blur"
-        style={{ color: dot }}
-      >
-        <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot }} />
-        {readOnly ? 'Somente leitura' : sync}
-      </span>
-
-      {/* User name badge */}
-      {user && !readOnly && (
-        <span className="hidden items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2 py-0.5 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur sm:flex">
-          <span
-            className="inline-block h-2.5 w-2.5 rounded-full border border-white"
-            style={{ backgroundColor: MY_COLOR }}
-          />
-          {user.name}
-        </span>
-      )}
-
-      {/* View-only badge */}
-      {readOnly && (
-        <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur">
-          <Eye size={15} />
-          Visualização
-        </span>
-      )}
-
-      {/* Share dropdown */}
-      {!readOnly && (
-        <div className="relative">
-          <button
-            onPointerDown={(e) => { e.stopPropagation(); setShowShare((v) => !v) }}
-            className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-800 shadow-sm backdrop-blur transition hover:bg-white"
-          >
-            <Share2 size={15} />
-            Compartilhar
-          </button>
-
-          {showShare && (
-            <>
-              <button
-                className="fixed inset-0 z-[100] cursor-default"
-                onPointerDown={(e) => { e.stopPropagation(); setShowShare(false) }}
-                aria-label="Fechar"
-              />
-              <div className="absolute right-0 top-full z-[101] mt-2 w-80 rounded-lg border border-neutral-200 bg-white p-3 shadow-xl">
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="text-sm font-semibold text-neutral-900">Links do mapa</p>
-                  <button
-                    onPointerDown={(e) => { e.stopPropagation(); setShowShare(false) }}
-                    className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-                <ShareRow
-                  icon={<PenLine size={16} />}
-                  label="Edição"
-                  description="Qualquer pessoa com o link pode editar."
-                  onCopy={() => copyLink('edit')}
-                  copied={copied === 'edit'}
-                />
-                <ShareRow
-                  icon={<Eye size={16} />}
-                  label="Visualização"
-                  description="Abre o mapa em modo somente leitura."
-                  onCopy={() => copyLink('view')}
-                  copied={copied === 'view'}
-                />
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Home button */}
-      <button
-        onPointerDown={(e) => { e.stopPropagation(); navigate('/') }}
-        className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
-      >
-        <Home size={15} />
-        Início
-      </button>
-    </div>
-  )
+  readOnly?: boolean
+  user?: SinapUser | null
+  onSaveRef?: React.MutableRefObject<(() => Promise<void>) | null>
 }
 
-// SharePanelSlot: stable reference (defined outside Canvas, reads from context)
-// tldraw renders this inside its own layout — the context propagates correctly
-// because Tldraw is a React child of our ShareCtx.Provider
-function SharePanelSlot() {
-  const ctx = useContext(ShareCtx)
-  return <SharePanelInner {...ctx} />
-}
-
-// Stable tldraw components object — never changes reference
-const TLDRAW_COMPONENTS = { SharePanel: SharePanelSlot }
-
+// ── ShareRow helper ───────────────────────────────────────────────────────────
 function ShareRow({
   icon, label, description, onCopy, copied,
 }: {
@@ -210,13 +86,150 @@ function ShareRow({
         </div>
       </div>
       <button
-        onPointerDown={(e) => { e.stopPropagation(); onCopy() }}
+        onClick={onCopy}
         className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-neutral-950 px-3 text-xs font-semibold text-white transition hover:bg-neutral-800"
       >
         <Copy size={14} />
         {copied ? 'Copiado!' : 'Copiar'}
       </button>
     </div>
+  )
+}
+
+// ── Canvas overlay (rendered via portal INTO document.body, outside tldraw) ──
+// This guarantees click events reach our handlers — tldraw cannot intercept them.
+interface OverlayProps {
+  boardId: string
+  readOnly: boolean
+  sync: string
+  user: SinapUser | null
+  saveState: 'idle' | 'saving' | 'saved'
+  onManualSave: () => void
+}
+
+function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave }: OverlayProps) {
+  const [, navigate] = useLocation()
+  const [showShare, setShowShare] = useState(false)
+  const [copied, setCopied] = useState<'edit' | 'view' | null>(null)
+
+  const copyLink = async (type: 'edit' | 'view') => {
+    const link = type === 'edit'
+      ? `${window.location.origin}/b/${boardId}`
+      : `${window.location.origin}/b/${boardId}?mode=view`
+    await navigator.clipboard.writeText(link)
+    setCopied(type)
+    setTimeout(() => setCopied(null), 1600)
+  }
+
+  const dot = sync === 'Online' ? '#0ca678' : sync === 'Local' ? '#868e96' : '#adb5bd'
+
+  const saveLabel =
+    saveState === 'saving' ? 'Salvando…' :
+    saveState === 'saved'  ? 'Salvo!' : 'Salvar'
+
+  return createPortal(
+    <>
+      {/* ── Main controls bar ── */}
+      <div className="fixed right-2 top-2 z-[9000] flex items-center gap-1.5">
+        {/* Sync indicator */}
+        <span
+          className="flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur"
+          style={{ color: dot }}
+        >
+          <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot }} />
+          {readOnly ? 'Somente leitura' : sync}
+        </span>
+
+        {/* User name badge */}
+        {user && !readOnly && (
+          <span className="hidden items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2.5 py-1 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur sm:flex">
+            <span
+              className="inline-block h-2 w-2 rounded-full border border-white shadow-sm"
+              style={{ backgroundColor: MY_COLOR }}
+            />
+            {user.name}
+          </span>
+        )}
+
+        {/* Manual save button */}
+        {!readOnly && (
+          <button
+            onClick={onManualSave}
+            disabled={saveState === 'saving'}
+            className={`inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold shadow-sm backdrop-blur transition hover:bg-white disabled:opacity-60 ${
+              saveState === 'saved' ? 'text-emerald-600' : 'text-neutral-700'
+            }`}
+          >
+            {saveState === 'saved' ? <Check size={14} /> : <Save size={14} />}
+            {saveLabel}
+          </button>
+        )}
+
+        {/* View-only badge */}
+        {readOnly && (
+          <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur">
+            <Eye size={15} />
+            Visualização
+          </span>
+        )}
+
+        {/* Share button */}
+        {!readOnly && (
+          <button
+            onClick={() => setShowShare((v) => !v)}
+            className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-800 shadow-sm backdrop-blur transition hover:bg-white"
+          >
+            <Share2 size={15} />
+            Compartilhar
+          </button>
+        )}
+
+        {/* Home / Início */}
+        <button
+          onClick={() => navigate('/')}
+          className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
+        >
+          <Home size={15} />
+          Início
+        </button>
+      </div>
+
+      {/* ── Share dropdown (portal-level, no stacking-context issues) ── */}
+      {showShare && (
+        <>
+          <div
+            className="fixed inset-0 z-[9001] cursor-default"
+            onClick={() => setShowShare(false)}
+          />
+          <div className="fixed right-2 top-[52px] z-[9002] w-80 rounded-xl border border-neutral-200 bg-white p-3 shadow-2xl">
+            <div className="mb-1 flex items-center justify-between">
+              <p className="text-sm font-semibold text-neutral-900">Links do mapa</p>
+              <button
+                onClick={() => setShowShare(false)}
+                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <ShareRow
+              icon={<PenLine size={16} />}
+              label="Edição"
+              description="Qualquer pessoa com o link pode editar."
+              onCopy={() => copyLink('edit')}
+              copied={copied === 'edit'}
+            />
+            <ShareRow
+              icon={<Eye size={16} />}
+              label="Visualização"
+              description="Abre o mapa em modo somente leitura."
+              onCopy={() => copyLink('view')}
+              copied={copied === 'view'}
+            />
+          </div>
+        </>
+      )}
+    </>,
+    document.body
   )
 }
 
@@ -229,10 +242,10 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const userNameRef = useRef<string>(user?.name || 'Anônimo')
   const lastLocalEditRef = useRef<number>(0)
   const [sync, setSync] = useState<string>(db ? 'Conectando' : 'Local')
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
   const [otherCursors, setOtherCursors] = useState<Record<string, CursorData>>({})
   const [, setTick] = useState(0)
 
-  // Keep userNameRef in sync with user prop
   useEffect(() => {
     userNameRef.current = user?.name || 'Anônimo'
   }, [user])
@@ -255,13 +268,32 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     return () => { debouncedSaveRef.current = null }
   }, [saveToFirebase])
 
+  // ── Manual save ──────────────────────────────────────────────────────────
+  const handleManualSave = useCallback(async () => {
+    if (!editorRef.current || !db || readOnly || saveState === 'saving') return
+    setSaveState('saving')
+    try {
+      const snap = getSnapshot(editorRef.current.store)
+      await set(ref(db, `boards/${boardId}`), {
+        document_state: snap,
+        last_saved_by: MY_SESSION,
+        updated_at: serverTimestamp(),
+      })
+      setSync('Online')
+      setSaveState('saved')
+      setTimeout(() => setSaveState('idle'), 2200)
+    } catch {
+      setSync('Local')
+      setSaveState('idle')
+    }
+  }, [boardId, readOnly, saveState])
+
   // ── Mount ────────────────────────────────────────────────────────────────
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
 
     if (readOnly) {
       editor.updateInstanceState({ isReadonly: true })
-      // View-only: fetch initial state from Firebase (IndexedDB may be empty)
       if (db) {
         get(ref(db, `boards/${boardId}`))
           .then((snap) => {
@@ -275,7 +307,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       }
     }
 
-    // Edit mode: listen to user changes and save
     if (!readOnly) {
       editor.store.listen(() => {
         lastLocalEditRef.current = Date.now()
@@ -284,7 +315,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       }, { source: 'user', scope: 'document' })
     }
 
-    // Cursor broadcast (throttled 50ms)
     throttledCursorRef.current = throttle((x: number, y: number) => {
       if (!db || readOnly) return
       set(ref(db, `cursors/${boardId}/${MY_SESSION}`), {
@@ -297,7 +327,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       if (pt) throttledCursorRef.current?.(pt.x, pt.y)
     }, { source: 'user' })
 
-    // Re-render cursor screen positions on any viewport change
     editor.store.listen(() => setTick((n) => n + 1), { source: 'all' })
 
     setEditorReady(true)
@@ -311,15 +340,8 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
       if (!data?.document_state) { setSync('Online'); return }
-
-      // Skip our own echo
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
-
-      // In edit mode, skip if user was editing in last 1.5s (protect local work)
-      if (!readOnly && Date.now() - lastLocalEditRef.current < 1500) {
-        setSync('Online'); return
-      }
-
+      if (!readOnly && Date.now() - lastLocalEditRef.current < 1500) { setSync('Online'); return }
       try {
         loadSnapshot(editorRef.current!.store, data.document_state as Partial<TLEditorSnapshot>)
         setSync('Online')
@@ -354,7 +376,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     return () => off(ref(db!, `cursors/${boardId}`))
   }, [boardId])
 
-  // ── Render cursor overlays ───────────────────────────────────────────────
+  // ── Cursor screen-space overlays ─────────────────────────────────────────
   const editor = editorRef.current
   const cursorElements = editor
     ? Object.entries(otherCursors).map(([id, c]) => {
@@ -362,7 +384,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         return (
           <div
             key={id}
-            className="pointer-events-none fixed z-[9999]"
+            className="pointer-events-none fixed z-[8999]"
             style={{ left: pt.x - 2, top: pt.y - 2 }}
           >
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
@@ -388,17 +410,25 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     : []
 
   return (
-    <ShareCtx.Provider value={{ boardId, readOnly, sync, user }}>
-      <div className="fixed inset-0">
-        <Tldraw
-          autoFocus
-          onMount={handleMount}
-          assets={assetStore}
-          persistenceKey={`sinapsia-${boardId}`}
-          components={TLDRAW_COMPONENTS}
-        />
-        {cursorElements}
-      </div>
-    </ShareCtx.Provider>
+    <div className="fixed inset-0">
+      <Tldraw
+        autoFocus
+        onMount={handleMount}
+        assets={assetStore}
+        persistenceKey={`sinapsia-${boardId}`}
+      />
+
+      {/* Overlay via portal — completely outside tldraw's DOM tree */}
+      <CanvasOverlay
+        boardId={boardId}
+        readOnly={readOnly}
+        sync={sync}
+        user={user}
+        saveState={saveState}
+        onManualSave={handleManualSave}
+      />
+
+      {cursorElements}
+    </div>
   )
 }

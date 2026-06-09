@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { ArrowRight, Clock, LogOut, Network, Plus } from 'lucide-react'
+import { ArrowRight, Check, Clock, LogOut, Network, Pencil, Plus } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import { db, ref, set, onValue, off, serverTimestamp } from '@/lib/firebase'
 import { getStoredUser, clearStoredUser } from '@/lib/auth'
@@ -22,6 +22,12 @@ export default function HomePage() {
   const [inputError, setInputError] = useState(false)
   const [creating, setCreating] = useState(false)
 
+  // Rename state
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState('')
+  const [savingTitle, setSavingTitle] = useState(false)
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
     const stored = getStoredUser()
     if (stored) setUser(stored)
@@ -40,6 +46,10 @@ export default function HomePage() {
     })
     return () => off(boardsRef)
   }, [user])
+
+  useEffect(() => {
+    if (editingId) renameInputRef.current?.focus()
+  }, [editingId])
 
   const handleAuthSuccess = (u: SinapUser) => {
     setUser(u)
@@ -94,6 +104,30 @@ export default function HomePage() {
     setShowAuth(true)
   }
 
+  // ── Rename logic ──────────────────────────────────────────────────────────
+  const startRename = (board: BoardEntry, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setEditingId(board.id)
+    setEditingTitle(board.title)
+  }
+
+  const commitRename = async () => {
+    if (!editingId || !user || !db) { setEditingId(null); return }
+    const trimmed = editingTitle.trim()
+    if (!trimmed) { setEditingId(null); return }
+    setSavingTitle(true)
+    try {
+      await set(ref(db, `userBoards/${user.phone}/${editingId}/title`), trimmed)
+    } catch { /* ok */ }
+    setSavingTitle(false)
+    setEditingId(null)
+  }
+
+  const cancelRename = () => {
+    setEditingId(null)
+    setEditingTitle('')
+  }
+
   return (
     <>
       {showAuth && <AuthModal onSuccess={handleAuthSuccess} />}
@@ -126,13 +160,11 @@ export default function HomePage() {
             )}
           </header>
 
-          {/* ── Top bar: title + actions ── */}
+          {/* ── Title + actions ── */}
           <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h1 className="text-3xl font-bold tracking-tight">Meus mapas</h1>
-              <p className="mt-1 text-sm text-neutral-500">
-                Crie ou abra um mapa colaborativo.
-              </p>
+              <p className="mt-1 text-sm text-neutral-500">Clique duas vezes no título de um mapa para renomear.</p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -142,7 +174,7 @@ export default function HomePage() {
                   onChange={(e) => { setBoardInput(e.target.value); setInputError(false) }}
                   onKeyDown={(e) => { if (e.key === 'Enter') openBoard() }}
                   placeholder="Colar link ou ID"
-                  className={`h-10 w-48 rounded-lg border px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950 ${
+                  className={`h-10 w-44 rounded-lg border px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950 ${
                     inputError ? 'border-red-400 bg-red-50' : 'border-neutral-300 bg-white'
                   }`}
                 />
@@ -169,24 +201,73 @@ export default function HomePage() {
           {/* ── Boards grid ── */}
           <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
             {boards.map((board) => (
-              <button
+              <div
                 key={board.id}
-                onClick={() => navigate(`/b/${board.id}`)}
-                className="group flex flex-col items-start rounded-xl border border-neutral-200 bg-white p-4 text-left shadow-sm transition hover:border-neutral-400 hover:shadow-md"
+                className="group relative flex flex-col items-start rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition hover:border-neutral-400 hover:shadow-md"
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-neutral-100 text-neutral-400 transition group-hover:bg-neutral-200">
+                {/* Canvas preview icon */}
+                <div
+                  className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg bg-neutral-100 text-neutral-400 transition group-hover:bg-neutral-200"
+                  onClick={() => navigate(`/b/${board.id}`)}
+                >
                   <Network size={20} />
                 </div>
-                <p className="mt-3 text-sm font-semibold leading-snug text-neutral-900">
-                  {board.title}
-                </p>
-                <p className="mt-0.5 flex items-center gap-1 text-xs text-neutral-400">
-                  <Clock size={11} />
-                  {new Date(board.createdAt).toLocaleDateString('pt-BR')}
-                </p>
-              </button>
+
+                {/* Title — double-click to rename */}
+                <div className="mt-3 w-full">
+                  {editingId === board.id ? (
+                    <div className="flex items-center gap-1">
+                      <input
+                        ref={renameInputRef}
+                        value={editingTitle}
+                        onChange={(e) => setEditingTitle(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitRename()
+                          if (e.key === 'Escape') cancelRename()
+                        }}
+                        className="w-full rounded border border-neutral-300 px-1.5 py-0.5 text-sm font-semibold text-neutral-900 outline-none focus:border-neutral-950"
+                        disabled={savingTitle}
+                        maxLength={48}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      {savingTitle && <Check size={13} className="shrink-0 text-emerald-500" />}
+                    </div>
+                  ) : (
+                    <p
+                      className="cursor-pointer text-sm font-semibold leading-snug text-neutral-900"
+                      onClick={() => navigate(`/b/${board.id}`)}
+                      onDoubleClick={(e) => startRename(board, e)}
+                      title="Clique duas vezes para renomear"
+                    >
+                      {board.title}
+                    </p>
+                  )}
+                </div>
+
+                {/* Date + rename icon */}
+                <div className="mt-0.5 flex w-full items-center justify-between">
+                  <p
+                    className="flex cursor-pointer items-center gap-1 text-xs text-neutral-400"
+                    onClick={() => navigate(`/b/${board.id}`)}
+                  >
+                    <Clock size={11} />
+                    {new Date(board.createdAt).toLocaleDateString('pt-BR')}
+                  </p>
+                  {editingId !== board.id && (
+                    <button
+                      onClick={(e) => startRename(board, e)}
+                      className="invisible flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-700 group-hover:visible"
+                      title="Renomear"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  )}
+                </div>
+              </div>
             ))}
 
+            {/* New board card */}
             <button
               onClick={createNewBoard}
               disabled={creating}
@@ -203,7 +284,8 @@ export default function HomePage() {
 
           {boards.length === 0 && !creating && user && (
             <p className="mt-16 text-center text-sm text-neutral-400">
-              Nenhum mapa ainda — clique em <strong>Novo mapa</strong> para começar.
+              Nenhum mapa ainda — clique em{' '}
+              <strong className="text-neutral-600">Novo mapa</strong> para começar.
             </p>
           )}
         </div>
