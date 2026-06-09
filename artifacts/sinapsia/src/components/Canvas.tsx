@@ -32,12 +32,14 @@ async function uploadToCloudinary(file: File): Promise<string> {
   const form = new FormData()
   form.append('file', file)
   form.append('upload_preset', UPLOAD_PRESET)
+  console.log('[Sinapsia] uploadToCloudinary starting', { cloudName: CLOUD_NAME, preset: UPLOAD_PRESET, fileName: file.name, size: file.size })
   const res = await fetch(
     `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/auto/upload`,
     { method: 'POST', body: form }
   )
   if (!res.ok) throw new Error(`Upload falhou (${res.status})`)
   const data = await res.json()
+  console.log('[Sinapsia] uploadToCloudinary succeeded', { url: data.secure_url })
   return data.secure_url as string
 }
 
@@ -100,7 +102,6 @@ function ShareRow({
 }
 
 // ── Canvas overlay (rendered via portal INTO document.body, outside tldraw) ──
-// This guarantees click events reach our handlers — tldraw cannot intercept them.
 interface OverlayProps {
   boardId: string
   readOnly: boolean
@@ -197,7 +198,7 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
         </button>
       </div>
 
-      {/* ── Share dropdown (portal-level, no stacking-context issues) ── */}
+      {/* ── Share dropdown ── */}
       {showShare && (
         <>
           <div
@@ -240,6 +241,11 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
 export default function Canvas({ boardId, readOnly = false, user = null }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
   const isApplyingRemoteRef = useRef(false)
+  // FIX: Block all writes until the initial Firebase load is complete.
+  // Without this guard, tldraw's own store initialisation fires the debounced
+  // write before Firebase has had a chance to respond — potentially overwriting
+  // saved content with an empty snapshot.
+  const initializedRef = useRef(false)
   const [editorReady, setEditorReady] = useState(false)
   const writeToFirebaseRef = useRef<((snap: TLEditorSnapshot) => Promise<void>) | null>(null)
   const throttledCursorRef = useRef<((x: number, y: number) => void) | null>(null)
@@ -253,10 +259,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     userNameRef.current = user?.name || 'Anônimo'
   }, [user])
 
-  // ── Helpers: serialise/deserialise snapshot ──────────────────────────────
-  // Store as JSON string to avoid Firebase nested-key restrictions
-  // (tldraw record IDs like "shape:uuid", "page:uuid" are fine as values but
-  //  can cause silent failures as Firebase object keys in some SDK versions)
+  // ── Helpers ───────────────────────────────────────────────────────────────
   const serializeSnap = (snap: TLEditorSnapshot): string =>
     JSON.stringify(snap)
 
@@ -274,139 +277,149 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   }
 
   const applyRemoteSnapshot = useCallback((editor: Editor, snap: Partial<TLEditorSnapshot>) => {
+    const shapeCount = countShapes(snap)
+    console.log('[Sinapsia] applyRemoteSnapshot', { boardId, shapeCount })
     try {
       isApplyingRemoteRef.current = true
       loadSnapshot(editor.store, snap)
       setSync('Online')
+      console.log('[Sinapsia] applyRemoteSnapshot OK', { boardId, shapeCount })
     } catch (err) {
-      console.error('[Sinapsia] loadSnapshot failed:', err)
+      console.error('[Sinapsia] applyRemoteSnapshot failed:', err)
       setSync('Local')
     } finally {
       isApplyingRemoteRef.current = false
     }
-  }, [])
+  }, [boardId])
 
-  // ── Write to Firebase ────────────────────────────────────────────────────
-  // Uses update() (not set()) so created_by/created_at metadata is preserved
+  // ── Write to Firebase ─────────────────────────────────────────────────────
   const writeToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
     if (!db || readOnly) {
+      // FIX: reset saveState so the button doesn't stay stuck on "Salvando…"
+      setSaveState('idle')
       console.log('[Sinapsia] writeToFirebase skipped', { boardId, readOnly, dbConnected: Boolean(db) })
       return
     }
     const serialized = serializeSnap(snap)
+    const shapeCount = countShapes(snap)
     try {
-      console.log('[Sinapsia] writeToFirebase starting', {
-        boardId,
-        snapshotSize: serialized.length,
-        session: MY_SESSION,
-      })
+      console.log('[Sinapsia] writeToFirebase starting', { boardId, shapeCount, snapshotSize: serialized.length, session: MY_SESSION })
       await update(ref(db, `boards/${boardId}`), {
         document_state: serialized,
         last_saved_by: MY_SESSION,
         updated_at: serverTimestamp(),
       })
-      console.log('[Sinapsia] writeToFirebase succeeded', { boardId })
+      console.log('[Sinapsia] writeToFirebase succeeded', { boardId, shapeCount })
       setSync('Online')
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 1200)
     } catch (err) {
-      console.error('[Sinapsia] Firebase write failed:', err)
+      console.error('[Sinapsia] writeToFirebase failed:', err)
       setSync('Local')
       setSaveState('idle')
     }
   }, [boardId, readOnly])
 
-  // Keep ref always pointing to latest (avoids stale closure in handleMount)
   useEffect(() => { writeToFirebaseRef.current = writeToFirebase }, [writeToFirebase])
 
-  // ── Manual save ──────────────────────────────────────────────────────────
+  // ── Manual save ───────────────────────────────────────────────────────────
   const handleManualSave = useCallback(async () => {
     if (!editorRef.current || !db || readOnly || saveState === 'saving') {
-      console.log('[Sinapsia] handleManualSave skipped', {
-        boardId,
-        editorReady: Boolean(editorRef.current),
-        dbConnected: Boolean(db),
-        readOnly,
-        saveState,
-      })
+      console.log('[Sinapsia] handleManualSave skipped', { boardId, editorReady: Boolean(editorRef.current), dbConnected: Boolean(db), readOnly, saveState })
       return
     }
     console.log('[Sinapsia] handleManualSave starting', { boardId, session: MY_SESSION })
     setSaveState('saving')
     try {
       const snap = getSnapshot(editorRef.current.store)
+      const shapeCount = countShapes(snap)
       await update(ref(db, `boards/${boardId}`), {
         document_state: serializeSnap(snap),
         last_saved_by: MY_SESSION,
         updated_at: serverTimestamp(),
       })
-      console.log('[Sinapsia] handleManualSave succeeded', { boardId })
+      console.log('[Sinapsia] handleManualSave succeeded', { boardId, shapeCount })
       setSync('Online')
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2200)
     } catch (err) {
-      console.error('[Sinapsia] Manual save failed:', err)
+      console.error('[Sinapsia] handleManualSave failed:', err)
       setSync('Local')
       setSaveState('idle')
     }
   }, [boardId, readOnly, saveState])
 
-  // ── Mount ────────────────────────────────────────────────────────────────
+  // ── Mount ─────────────────────────────────────────────────────────────────
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
+    console.log('[Sinapsia] handleMount', { boardId, readOnly, session: MY_SESSION, dbConnected: Boolean(db) })
 
     if (readOnly) {
       editor.updateInstanceState({ isReadonly: true })
     }
 
     if (db) {
-      console.log('[Sinapsia] Firebase initial load for board', { boardId })
+      console.log('[Sinapsia] Firebase initial load starting', { boardId })
       get(ref(db, `boards/${boardId}`))
         .then(async (fbSnap) => {
           const data = fbSnap.val()
-          console.log('[Sinapsia] Firebase initial load snapshot', { boardId, data })
           const remote = deserializeSnap(data?.document_state)
-
-          if (!remote) {
-            setSync('Online')
-            return
-          }
-
-          const local = getSnapshot(editor.store)
           const remoteShapeCount = countShapes(remote)
+          const local = getSnapshot(editor.store)
           const localShapeCount = countShapes(local)
-          console.log('[Sinapsia] Firebase initial load comparison', {
+
+          console.log('[Sinapsia] Firebase initial load result', {
             boardId,
-            localShapeCount,
+            hasRemote: Boolean(remote),
             remoteShapeCount,
+            localShapeCount,
+            lastSavedBy: data?.last_saved_by,
+            updatedAt: data?.updated_at,
           })
 
-          if (!readOnly && localShapeCount > remoteShapeCount) {
+          if (!remote || remoteShapeCount === 0) {
+            console.log('[Sinapsia] Firebase initial load: no remote content, staying local', { boardId })
+            setSync('Online')
+          } else if (!readOnly && localShapeCount > remoteShapeCount) {
+            console.log('[Sinapsia] Firebase initial load: local is newer, pushing to Firebase', { boardId, localShapeCount, remoteShapeCount })
             await writeToFirebaseRef.current?.(local)
-            return
+          } else {
+            console.log('[Sinapsia] Firebase initial load: applying remote', { boardId, remoteShapeCount })
+            applyRemoteSnapshot(editor, remote)
           }
-
-          applyRemoteSnapshot(editor, remote)
         })
         .catch((err) => {
           console.error('[Sinapsia] Firebase initial load failed:', err)
           setSync('Local')
         })
+        .finally(() => {
+          // Only enable writes AFTER the initial load is done.
+          // This prevents tldraw's own store init events from overwriting Firebase
+          // with an empty snapshot before the saved content is loaded.
+          console.log('[Sinapsia] Firebase initial load complete — writes unblocked', { boardId })
+          initializedRef.current = true
+        })
+    } else {
+      // No Firebase — unblock writes immediately (local-only mode)
+      initializedRef.current = true
     }
 
     if (!readOnly) {
-      // Debounce created HERE (inside handleMount) to guarantee it's ready
-      // before any store change fires — eliminates the useEffect timing race.
-      // No `scope` filter: tldraw v5 may not honour `scope:'document'` for
-      // all change types, which caused the listener to silently never fire.
       const debouncedWrite = debounce(() => {
         const currentEditor = editorRef.current
         if (!currentEditor) return
+        // FIX: skip writes until initial Firebase load is complete
+        if (!initializedRef.current) {
+          console.log('[Sinapsia] debouncedWrite blocked — not yet initialized', { boardId })
+          return
+        }
         writeToFirebaseRef.current?.(getSnapshot(currentEditor.store))
       }, 400)
 
       editor.store.listen(() => {
         if (isApplyingRemoteRef.current) return
+        // FIX: don't show "Salvando…" during initialization phase
+        if (!initializedRef.current) return
         setSaveState('saving')
         debouncedWrite()
       }, { source: 'all' })
@@ -429,25 +442,31 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     setEditorReady(true)
   }, [applyRemoteSnapshot, boardId, readOnly])
 
-  // ── Real-time board sync ─────────────────────────────────────────────────
+  // ── Real-time board sync ──────────────────────────────────────────────────
   useEffect(() => {
     if (!editorReady || !db || !editorRef.current) return
     const boardRef = ref(db, `boards/${boardId}`)
 
+    console.log('[Sinapsia] onValue subscription starting', { boardId, session: MY_SESSION })
+
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
-      console.log('[Sinapsia] onValue board update', { boardId, data })
       if (!data?.document_state) { setSync('Online'); return }
+      // Skip updates that we ourselves wrote
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
       const parsed = deserializeSnap(data.document_state)
       if (!parsed) { setSync('Online'); return }
+      console.log('[Sinapsia] onValue: received remote update', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
       applyRemoteSnapshot(editorRef.current!, parsed)
     }, (err) => { console.error('[Sinapsia] onValue error:', err); setSync('Local') })
 
-    return () => off(boardRef)
+    return () => {
+      console.log('[Sinapsia] onValue subscription cleanup', { boardId })
+      off(boardRef)
+    }
   }, [applyRemoteSnapshot, editorReady, boardId, readOnly])
 
-  // ── Cursor disconnect cleanup ────────────────────────────────────────────
+  // ── Cursor disconnect cleanup ─────────────────────────────────────────────
   useEffect(() => {
     if (!editorReady || !db || readOnly) return
     const cursorRef = ref(db, `cursors/${boardId}/${MY_SESSION}`)
@@ -455,7 +474,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     return () => { set(cursorRef, null).catch(() => {}) }
   }, [editorReady, boardId, readOnly])
 
-  // ── Other cursors subscription ───────────────────────────────────────────
+  // ── Other cursors subscription ────────────────────────────────────────────
   useEffect(() => {
     if (!db) return
     const cursorsRef = ref(db, `cursors/${boardId}`)
@@ -472,7 +491,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     return () => off(ref(db!, `cursors/${boardId}`))
   }, [boardId])
 
-  // ── Cursor screen-space overlays ─────────────────────────────────────────
+  // ── Cursor screen-space overlays ──────────────────────────────────────────
   const editor = editorRef.current
   const cursorElements = editor
     ? Object.entries(otherCursors).map(([id, c]) => {
@@ -514,7 +533,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         persistenceKey={`sinapsia-${boardId}`}
       />
 
-      {/* Overlay via portal — completely outside tldraw's DOM tree */}
       <CanvasOverlay
         boardId={boardId}
         readOnly={readOnly}

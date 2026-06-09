@@ -22,3 +22,16 @@ timeoutMs = 20000
 [[ports]]
 localPort = 19111
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+VITE_FIREBASE_API_KEY = "AIzaSyDUSjWONd5xqRqpnSz95iEu15HOkYEdSlU"
+VITE_FIREBASE_AUTH_DOMAIN = "sinapsia-59304.firebaseapp.com"
+VITE_FIREBASE_DATABASE_URL = "https://sinapsia-59304-default-rtdb.firebaseio.com/"
+VITE_FIREBASE_PROJECT_ID = "sinapsia-59304"
+VITE_FIREBASE_STORAGE_BUCKET = "sinapsia-59304.firebasestorage.app"
+VITE_FIREBASE_MESSAGING_SENDER_ID = "505503253239"
+VITE_FIREBASE_APP_ID = "1:505503253239:web:9844fee6c8e190741149f2"
+VITE_CLOUDINARY_CLOUD_NAME = "di3lqsxxc"
+VITE_CLOUDINARY_UPLOAD_PRESET = "sinapsia_unsigned"
