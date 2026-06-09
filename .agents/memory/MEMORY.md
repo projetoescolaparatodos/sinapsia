@@ -1,2 +1,3 @@
-- [tldraw-v5-store-mutation](tldraw-v5-store-mutation.md) — never call editor.store.put()/remove() directly in tldraw v5; use loadSnapshot for safe remote updates
-- [firebase-race-condition-fix](firebase-race-condition-fix.md) — initializedRef pattern blocks writes until Firebase initial load completes, preventing tldraw init events from overwriting saved data
+- [Sinapsia tldraw dark mode](sinapsia-tldraw-dark.md) — darkMode prop só inicializa; para troca dinâmica use editor.user.updateUserPreferences({ colorScheme })
+- [Sinapsia Firebase write optimization](sinapsia-firebase-writes.md) — filtrar por CONTENT_TYPES + debounce 1500ms evita writes em camera/cursor
+- [Sinapsia tldraw style panel CSS](sinapsia-style-panel.md) — .tlui-style-panel__wrapper pode ser empurrado com margin-top via override CSS

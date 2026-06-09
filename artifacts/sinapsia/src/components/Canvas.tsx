@@ -145,26 +145,29 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave,
     saveState === 'saving' ? 'Salvando…' :
     saveState === 'saved'  ? 'Salvo!' : 'Salvar'
 
-  const btnCls = 'inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-3 text-xs font-semibold text-neutral-700 dark:text-neutral-300 shadow-sm backdrop-blur transition hover:bg-white dark:hover:bg-neutral-800'
+  const btnCls = 'inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2 sm:px-3 text-xs font-semibold text-neutral-700 dark:text-neutral-300 shadow-sm backdrop-blur transition hover:bg-white dark:hover:bg-neutral-800'
 
   return createPortal(
     <>
-      <div className="fixed right-2 top-2 z-[9000] flex items-center gap-1.5">
+      <div className="fixed right-2 top-2 z-[9000] flex flex-wrap items-center justify-end gap-1 sm:gap-1.5">
+        {/* Sync status */}
         <span
-          className="flex items-center gap-1.5 rounded-full border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur"
+          className="flex items-center gap-1 sm:gap-1.5 rounded-full border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2 sm:px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur"
           style={{ color: dot }}
         >
-          <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot }} />
-          {readOnly ? 'Somente leitura' : sync}
+          <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: dot }} />
+          <span className="hidden sm:inline">{readOnly ? 'Somente leitura' : sync}</span>
         </span>
 
+        {/* User chip — sm+ only */}
         {user && !readOnly && (
-          <span className="hidden items-center gap-1.5 rounded-full border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2.5 py-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 shadow-sm backdrop-blur sm:flex">
+          <span className="hidden lg:flex items-center gap-1.5 rounded-full border border-black/10 dark:border-white/10 bg-white/90 dark:bg-neutral-900/90 px-2.5 py-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 shadow-sm backdrop-blur">
             <span className="inline-block h-2 w-2 rounded-full border border-white shadow-sm" style={{ backgroundColor: MY_COLOR }} />
             {user.name}
           </span>
         )}
 
+        {/* Save */}
         {!readOnly && (
           <button
             onClick={onManualSave}
@@ -172,36 +175,39 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave,
             className={`${btnCls} disabled:opacity-60 ${saveState === 'saved' ? '!text-emerald-600' : ''}`}
           >
             {saveState === 'saved' ? <Check size={14} /> : <Save size={14} />}
-            {saveLabel}
+            <span className="hidden sm:inline">{saveLabel}</span>
           </button>
         )}
 
+        {/* Read-only badge */}
         {readOnly && (
           <span className={btnCls}>
             <Eye size={15} />
-            Visualização
+            <span className="hidden sm:inline">Visualização</span>
           </span>
         )}
 
+        {/* Share */}
         {!readOnly && (
           <button onClick={() => setShowShare((v) => !v)} className={btnCls}>
             <Share2 size={15} />
-            Compartilhar
+            <span className="hidden sm:inline">Compartilhar</span>
           </button>
         )}
 
         {/* Theme toggle */}
         <button
           onClick={onThemeToggle}
-          className={`${btnCls} !px-2.5`}
+          className={btnCls}
           title={isDark ? 'Mudar para claro' : 'Mudar para escuro'}
         >
           {isDark ? <Sun size={15} /> : <Moon size={15} />}
         </button>
 
+        {/* Home */}
         <button onClick={() => navigate('/')} className={btnCls}>
           <Home size={15} />
-          Início
+          <span className="hidden sm:inline">Início</span>
         </button>
       </div>
 
@@ -251,6 +257,13 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const pendingRemoteSnapRef = useRef<Partial<TLEditorSnapshot> | null>(null)
 
   const [editorReady, setEditorReady] = useState(false)
+
+  // Sync dark mode into tldraw's editor preferences reactively
+  useEffect(() => {
+    if (!editorRef.current) return
+    editorRef.current.user.updateUserPreferences({ colorScheme: isDark ? 'dark' : 'light' })
+  }, [isDark, editorReady])
+
   const writeToFirebaseRef = useRef<((snap: TLEditorSnapshot) => Promise<void>) | null>(null)
   const throttledCursorRef = useRef<((x: number, y: number) => void) | null>(null)
   const userNameRef = useRef<string>(user?.name || 'Anônimo')

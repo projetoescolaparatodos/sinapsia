@@ -112,3 +112,8 @@
     font-family: 'Inter', Arial, Helvetica, sans-serif;
   }
 }
+
+/* Push tldraw's floating style panel (color/size picker) below our custom overlay buttons */
+.tlui-style-panel__wrapper {
+  margin-top: 48px !important;
+}
