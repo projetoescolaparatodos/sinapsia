@@ -35,9 +35,11 @@ export default function AuthModal({ onSuccess }: AuthModalProps) {
       return
     }
 
+    console.log('[Sinapsia] AuthModal handlePhoneSubmit', { phone: clean })
     setLoading(true)
     try {
       const existingName = await lookupUserName(clean)
+      console.log('[Sinapsia] AuthModal handlePhoneSubmit lookup result', { phone: clean, existingName })
       if (existingName) {
         // Returning user — log in immediately, no name step needed
         const user: SinapUser = { phone: clean, name: existingName }
@@ -47,7 +49,8 @@ export default function AuthModal({ onSuccess }: AuthModalProps) {
         // New user — ask for name
         setStep('name')
       }
-    } catch {
+    } catch (err) {
+      console.error('[Sinapsia] AuthModal handlePhoneSubmit failed', err)
       setError('Erro de conexão. Verifique sua internet e tente novamente.')
     } finally {
       setLoading(false)
@@ -58,6 +61,7 @@ export default function AuthModal({ onSuccess }: AuthModalProps) {
   const handleNameSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+    console.log('[Sinapsia] AuthModal handleNameSubmit', { phone: clean, name })
 
     if (!name.trim()) {
       setError('Escolha um apelido para aparecer no canvas.')
@@ -72,8 +76,10 @@ export default function AuthModal({ onSuccess }: AuthModalProps) {
     try {
       const user: SinapUser = { phone: clean, name: name.trim() }
       await saveUser(user)
+      console.log('[Sinapsia] AuthModal created user', user)
       onSuccess(user)
-    } catch {
+    } catch (err) {
+      console.error('[Sinapsia] AuthModal handleNameSubmit failed', err)
       setError('Erro ao criar conta. Tente novamente.')
     } finally {
       setLoading(false)
