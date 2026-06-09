@@ -1,153 +1,166 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   type Editor,
+  type TLEditorSnapshot,
+  type TLAssetStore,
   getSnapshot,
   loadSnapshot,
-  type TLEditorSnapshot,
   Tldraw,
-  throttle,
 } from 'tldraw'
 import 'tldraw/tldraw.css'
-import { isSupabaseConfigured, supabase } from '@/lib/supabase'
+import { db, ref, set, onValue, off, serverTimestamp } from '@/lib/firebase'
 
 interface CanvasProps {
   boardId: string
   readOnly?: boolean
 }
 
+const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'di3lqsxxc'
+const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'sinapsia_unsigned'
+
+async function uploadToCloudinary(file: File): Promise<string> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('upload_preset', UPLOAD_PRESET)
+
+  const res = await fetch(
+    `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/auto/upload`,
+    { method: 'POST', body: form }
+  )
+  if (!res.ok) throw new Error(`Upload falhou (${res.status})`)
+  const data = await res.json()
+  return data.secure_url as string
+}
+
+const assetStore: TLAssetStore = {
+  async upload(_asset, file) {
+    return await uploadToCloudinary(file)
+  },
+  resolve(asset) {
+    return asset.props.src ?? null
+  },
+}
+
+function debounce<T extends (...args: Parameters<T>) => void>(fn: T, ms: number): T {
+  let t: ReturnType<typeof setTimeout>
+  return ((...args: Parameters<T>) => {
+    clearTimeout(t)
+    t = setTimeout(() => fn(...args), ms)
+  }) as T
+}
+
+type SyncState = 'Conectando' | 'Online' | 'Local' | 'Somente leitura'
+
 export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
-  const isApplyingRemoteUpdate = useRef(false)
-  const throttledSaveRef = useRef<((editor: Editor) => void) | null>(null)
-  const [syncLabel, setSyncLabel] = useState(
-    isSupabaseConfigured ? 'Conectando' : 'Local'
+  const isApplyingRemote = useRef(false)
+  const debouncedSave = useRef<((snap: TLEditorSnapshot) => void) | null>(null)
+  const [sync, setSync] = useState<SyncState>(
+    readOnly ? 'Somente leitura' : db ? 'Conectando' : 'Local'
   )
 
-  const loadBoard = useCallback(
-    async (editor: Editor) => {
-      if (!supabase) return
-
-      const { data, error } = await supabase
-        .from('boards')
-        .select('document_state')
-        .eq('id', boardId)
-        .maybeSingle()
-
-      if (error) {
-        setSyncLabel('Local')
-        return
-      }
-
-      if (!data?.document_state) {
-        setSyncLabel('Online')
-        return
-      }
-
+  // ── Save to Firebase ─────────────────────────────────────────────────────
+  const saveToFirebase = useCallback(
+    async (snap: TLEditorSnapshot) => {
+      if (!db || isApplyingRemote.current || readOnly) return
       try {
-        isApplyingRemoteUpdate.current = true
-        loadSnapshot(editor.store, data.document_state as Partial<TLEditorSnapshot>)
-        setSyncLabel('Online')
+        await set(ref(db, `boards/${boardId}`), {
+          document_state: snap,
+          updated_at: serverTimestamp(),
+        })
+        setSync('Online')
       } catch {
-        setSyncLabel('Local')
-      } finally {
-        isApplyingRemoteUpdate.current = false
+        setSync('Local')
       }
-    },
-    [boardId]
-  )
-
-  const saveBoard = useCallback(
-    async (editor: Editor) => {
-      if (!supabase || isApplyingRemoteUpdate.current || readOnly) return
-
-      const snapshot = getSnapshot(editor.store)
-      const { error } = await supabase
-        .from('boards')
-        .upsert({ id: boardId, document_state: snapshot })
-
-      setSyncLabel(error ? 'Local' : 'Online')
     },
     [boardId, readOnly]
   )
 
   useEffect(() => {
-    throttledSaveRef.current = throttle(saveBoard, 1500)
+    debouncedSave.current = debounce(saveToFirebase, 300)
+    return () => { debouncedSave.current = null }
+  }, [saveToFirebase])
 
-    return () => {
-      throttledSaveRef.current = null
-    }
-  }, [saveBoard])
+  // ── Load + subscribe to Firebase ─────────────────────────────────────────
+  const subscribe = useCallback(
+    (editor: Editor) => {
+      if (!db) return
 
-  useEffect(() => {
-    const client = supabase
-    if (!client) return
+      const boardRef = ref(db, `boards/${boardId}/document_state`)
 
-    const channel = client
-      .channel(`board:${boardId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'boards',
-          filter: `id=eq.${boardId}`,
-        },
-        (payload) => {
-          const editor = editorRef.current
-          if (!editor || !('document_state' in payload.new)) return
-
-          try {
-            isApplyingRemoteUpdate.current = true
-            loadSnapshot(
-              editor.store,
-              // @ts-ignore
-              payload.new.document_state as Partial<TLEditorSnapshot>
-            )
-            setSyncLabel('Online')
-          } catch {
-            setSyncLabel('Local')
-          } finally {
-            isApplyingRemoteUpdate.current = false
+      onValue(
+        boardRef,
+        (snapshot) => {
+          const data = snapshot.val()
+          if (data && !isApplyingRemote.current) {
+            try {
+              isApplyingRemote.current = true
+              loadSnapshot(editor.store, data as Partial<TLEditorSnapshot>)
+            } finally {
+              isApplyingRemote.current = false
+            }
           }
+          setSync('Online')
+        },
+        () => {
+          // Firebase unreachable (DB not enabled or bad URL) — silent fallback
+          setSync('Local')
         }
       )
-      .subscribe((status) => {
-        setSyncLabel(status === 'SUBSCRIBED' ? 'Online' : 'Conectando')
-      })
 
-    return () => {
-      client.removeChannel(channel)
-    }
-  }, [boardId])
+      return () => {
+        off(boardRef)
+      }
+    },
+    [boardId]
+  )
 
+  // ── Mount ─────────────────────────────────────────────────────────────────
   const handleMount = useCallback(
     (editor: Editor) => {
       editorRef.current = editor
-      loadBoard(editor)
 
       if (readOnly) {
         editor.updateInstanceState({ isReadonly: true })
+        setSync('Somente leitura')
+        subscribe(editor)
         return
       }
 
-      editor.store.listen(() => throttledSaveRef.current?.(editor), {
-        source: 'user',
-        scope: 'document',
-      })
+      const unsub = subscribe(editor)
+
+      editor.store.listen(
+        () => {
+          const snap = getSnapshot(editor.store)
+          debouncedSave.current?.(snap)
+        },
+        { source: 'user', scope: 'document' }
+      )
+
+      return () => unsub?.()
     },
-    [loadBoard, readOnly]
+    [subscribe, readOnly]
   )
+
+  const syncColor =
+    sync === 'Online' ? 'text-emerald-600'
+    : sync === 'Local' ? 'text-neutral-500'
+    : sync === 'Somente leitura' ? 'text-amber-600'
+    : 'text-neutral-400'
 
   return (
     <div className="fixed inset-0">
       <Tldraw
         autoFocus
         onMount={handleMount}
+        assets={assetStore}
         persistenceKey={`sinapsia-${boardId}`}
       />
 
-      <div className="pointer-events-none fixed bottom-3 right-3 z-40 rounded-lg border border-black/10 bg-white/90 px-2.5 py-1.5 text-xs font-medium text-neutral-700 shadow-sm backdrop-blur dark:border-white/10 dark:bg-neutral-950/80 dark:text-neutral-200">
-        {readOnly ? 'Somente leitura' : syncLabel}
+      <div
+        className={`pointer-events-none fixed bottom-3 right-3 z-50 rounded-lg border border-black/10 bg-white/90 px-2.5 py-1.5 text-xs font-semibold shadow-sm backdrop-blur ${syncColor}`}
+      >
+        {sync}
       </div>
     </div>
   )

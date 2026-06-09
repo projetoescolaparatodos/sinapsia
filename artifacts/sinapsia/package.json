@@ -76,6 +76,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.0",
+    "firebase": "^12.14.0",
     "tldraw": "^5.1.0",
     "uuid": "^14.0.0"
   }

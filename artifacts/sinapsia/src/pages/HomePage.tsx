@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useLocation } from 'wouter'
 import { ArrowRight, ExternalLink, Network, PenLine, Share2 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
-import { isSupabaseConfigured, supabase } from '@/lib/supabase'
+import { isFirebaseConfigured, db, ref, set, serverTimestamp } from '@/lib/firebase'
 
 export default function HomePage() {
   const [, navigate] = useLocation()
@@ -13,8 +13,15 @@ export default function HomePage() {
     setLoading(true)
     const id = uuidv4()
 
-    if (supabase) {
-      await supabase.from('boards').upsert({ id, document_state: null })
+    if (db) {
+      try {
+        await set(ref(db, `boards/${id}`), {
+          document_state: null,
+          updated_at: serverTimestamp(),
+        })
+      } catch {
+        // Continua mesmo sem Firebase — modo local
+      }
     }
 
     navigate(`/b/${id}`)
@@ -46,7 +53,7 @@ export default function HomePage() {
           </div>
 
           <span className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs font-medium text-neutral-600 shadow-sm">
-            {isSupabaseConfigured ? 'Multiplayer ativo' : 'Modo local'}
+            {isFirebaseConfigured ? 'Multiplayer ativo' : 'Modo local'}
           </span>
         </header>
 
@@ -67,7 +74,7 @@ export default function HomePage() {
                 className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-neutral-950 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Network size={18} />
-                {loading ? 'Criando mapa' : 'Criar novo mapa'}
+                {loading ? 'Criando mapa…' : 'Criar novo mapa'}
               </button>
               <a
                 href="#abrir"
@@ -87,10 +94,8 @@ export default function HomePage() {
               <input
                 id="board-link"
                 value={boardInput}
-                onChange={(event) => setBoardInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') openBoard()
-                }}
+                onChange={(e) => setBoardInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') openBoard() }}
                 placeholder="Cole um link ou ID"
                 className="h-11 min-w-0 flex-1 rounded-lg border border-neutral-300 px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950"
               />
@@ -98,7 +103,6 @@ export default function HomePage() {
                 onClick={openBoard}
                 className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[#0f766e] text-white transition hover:bg-[#115e59]"
                 aria-label="Abrir mapa"
-                title="Abrir mapa"
               >
                 <ArrowRight size={18} />
               </button>
@@ -112,7 +116,7 @@ export default function HomePage() {
                 Gere links para editar ou apenas visualizar.
               </Feature>
               <Feature icon={<ExternalLink size={18} />} title="Mídias leves">
-                Arraste imagens, GIFs e vídeos suportados pelo Tldraw.
+                Arraste imagens e GIFs ou cole URLs diretamente no canvas.
               </Feature>
             </div>
           </div>
@@ -122,11 +126,7 @@ export default function HomePage() {
   )
 }
 
-function Feature({
-  icon,
-  title,
-  children,
-}: {
+function Feature({ icon, title, children }: {
   icon: React.ReactNode
   title: string
   children: React.ReactNode
