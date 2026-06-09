@@ -32,13 +32,16 @@ async function uploadToCloudinary(file: File): Promise<string> {
   const form = new FormData()
   form.append('file', file)
   form.append('upload_preset', UPLOAD_PRESET)
-  console.log('[Sinapsia] uploadToCloudinary starting', { cloudName: CLOUD_NAME, preset: UPLOAD_PRESET, fileName: file.name, size: file.size })
+  console.log('[Sinapsia] uploadToCloudinary starting', { cloudName: CLOUD_NAME, preset: UPLOAD_PRESET, fileName: file.name, size: file.size, type: file.type })
   const res = await fetch(
-    `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/auto/upload`,
+    `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
     { method: 'POST', body: form }
   )
-  if (!res.ok) throw new Error(`Upload falhou (${res.status})`)
   const data = await res.json()
+  if (!res.ok) {
+    console.error('[Sinapsia] uploadToCloudinary failed', { status: res.status, error: data?.error?.message ?? data })
+    throw new Error(data?.error?.message ?? `Upload falhou (${res.status})`)
+  }
   console.log('[Sinapsia] uploadToCloudinary succeeded', { url: data.secure_url })
   return data.secure_url as string
 }
