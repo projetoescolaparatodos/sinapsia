@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Sinapsia"
+version = "1.0.0"
+id = "artifacts/sinapsia"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19111
+
+[services.development]
+run = "pnpm --filter @workspace/sinapsia run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/sinapsia", "run", "build" ]
+publicDir = "artifacts/sinapsia/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19111"
+BASE_PATH = "/"
