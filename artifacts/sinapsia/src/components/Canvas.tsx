@@ -9,6 +9,7 @@ import {
   type Editor,
   type TLEditorSnapshot,
   type TLAssetStore,
+  type TLRecord,
   getSnapshot,
   loadSnapshot,
   Tldraw,
@@ -74,6 +75,11 @@ interface CanvasProps {
   onSaveRef?: React.MutableRefObject<(() => Promise<void>) | null>
 }
 
+// How long (ms) a locally-touched shape is protected from remote overwrites.
+// While a user is drawing, their shapes are protected. Once they commit and
+// 2s passes, remote changes can update those shapes normally.
+const LOCAL_GUARD_MS = 2000
+
 // ── ShareRow helper ───────────────────────────────────────────────────────────
 function ShareRow({
   icon, label, description, onCopy, copied,
@@ -101,7 +107,7 @@ function ShareRow({
   )
 }
 
-// ── Canvas overlay (rendered via portal INTO document.body, outside tldraw) ──
+// ── Canvas overlay (portal into document.body, outside tldraw) ───────────────
 interface OverlayProps {
   boardId: string
   readOnly: boolean
@@ -133,9 +139,7 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
 
   return createPortal(
     <>
-      {/* ── Main controls bar ── */}
       <div className="fixed right-2 top-2 z-[9000] flex items-center gap-1.5">
-        {/* Sync indicator */}
         <span
           className="flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2.5 py-1 text-xs font-semibold shadow-sm backdrop-blur"
           style={{ color: dot }}
@@ -144,18 +148,13 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
           {readOnly ? 'Somente leitura' : sync}
         </span>
 
-        {/* User name badge */}
         {user && !readOnly && (
           <span className="hidden items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2.5 py-1 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur sm:flex">
-            <span
-              className="inline-block h-2 w-2 rounded-full border border-white shadow-sm"
-              style={{ backgroundColor: MY_COLOR }}
-            />
+            <span className="inline-block h-2 w-2 rounded-full border border-white shadow-sm" style={{ backgroundColor: MY_COLOR }} />
             {user.name}
           </span>
         )}
 
-        {/* Manual save button */}
         {!readOnly && (
           <button
             onClick={onManualSave}
@@ -169,7 +168,6 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
           </button>
         )}
 
-        {/* View-only badge */}
         {readOnly && (
           <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur">
             <Eye size={15} />
@@ -177,7 +175,6 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
           </span>
         )}
 
-        {/* Share button */}
         {!readOnly && (
           <button
             onClick={() => setShowShare((v) => !v)}
@@ -188,7 +185,6 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
           </button>
         )}
 
-        {/* Home / Início */}
         <button
           onClick={() => navigate('/')}
           className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
@@ -198,13 +194,9 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
         </button>
       </div>
 
-      {/* ── Share dropdown ── */}
       {showShare && (
         <>
-          <div
-            className="fixed inset-0 z-[9001] cursor-default"
-            onClick={() => setShowShare(false)}
-          />
+          <div className="fixed inset-0 z-[9001] cursor-default" onClick={() => setShowShare(false)} />
           <div className="fixed right-2 top-[52px] z-[9002] w-80 rounded-xl border border-neutral-200 bg-white p-3 shadow-2xl">
             <div className="mb-1 flex items-center justify-between">
               <p className="text-sm font-semibold text-neutral-900">Links do mapa</p>
@@ -241,11 +233,14 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
 export default function Canvas({ boardId, readOnly = false, user = null }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
   const isApplyingRemoteRef = useRef(false)
-  // FIX: Block all writes until the initial Firebase load is complete.
-  // Without this guard, tldraw's own store initialisation fires the debounced
-  // write before Firebase has had a chance to respond — potentially overwriting
-  // saved content with an empty snapshot.
+  // Blocks writes until the initial Firebase load completes (prevents
+  // tldraw's own store init events from overwriting saved data)
   const initializedRef = useRef(false)
+  // Tracks shape/record IDs recently modified by THIS user.
+  // Remote updates skip these records for LOCAL_GUARD_MS to preserve
+  // in-progress work during collaborative editing.
+  const localTouchedRef = useRef<Map<string, number>>(new Map())
+
   const [editorReady, setEditorReady] = useState(false)
   const writeToFirebaseRef = useRef<((snap: TLEditorSnapshot) => Promise<void>) | null>(null)
   const throttledCursorRef = useRef<((x: number, y: number) => void) | null>(null)
@@ -255,13 +250,21 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const [otherCursors, setOtherCursors] = useState<Record<string, CursorData>>({})
   const [, setTick] = useState(0)
 
+  useEffect(() => { userNameRef.current = user?.name || 'Anônimo' }, [user])
+
+  // Periodically evict old entries from localTouchedRef so it doesn't grow unbounded
   useEffect(() => {
-    userNameRef.current = user?.name || 'Anônimo'
-  }, [user])
+    const timer = setInterval(() => {
+      const cutoff = Date.now() - LOCAL_GUARD_MS * 5
+      for (const [id, ts] of localTouchedRef.current) {
+        if (ts < cutoff) localTouchedRef.current.delete(id)
+      }
+    }, 5_000)
+    return () => clearInterval(timer)
+  }, [])
 
   // ── Helpers ───────────────────────────────────────────────────────────────
-  const serializeSnap = (snap: TLEditorSnapshot): string =>
-    JSON.stringify(snap)
+  const serializeSnap = (snap: TLEditorSnapshot): string => JSON.stringify(snap)
 
   const deserializeSnap = (raw: unknown): Partial<TLEditorSnapshot> | null => {
     if (!raw) return null
@@ -273,12 +276,73 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const countShapes = (snap: Partial<TLEditorSnapshot> | null): number => {
     const records = snap?.document?.store
     if (!records) return 0
-    return Object.values(records).filter((record) => record?.typeName === 'shape').length
+    return Object.values(records).filter((r: any) => r?.typeName === 'shape').length
   }
 
+  // ── Shape-level merge (replaces full loadSnapshot for real-time updates) ──
+  //
+  // Instead of blindly replacing the entire canvas with a remote snapshot,
+  // we apply a surgical per-record merge:
+  //   • Records the local user recently touched are kept as-is (LOCAL_GUARD_MS)
+  //   • All other records are updated to match the remote version
+  //   • Shapes deleted remotely are removed locally (unless locally guarded)
+  //
+  // This means two people can draw simultaneously without erasing each other.
+  const applyRemoteMerge = useCallback((editor: Editor, remoteSnap: Partial<TLEditorSnapshot>) => {
+    const remoteStore = remoteSnap.document?.store as Record<string, TLRecord> | undefined
+    if (!remoteStore) { setSync('Online'); return }
+
+    const now = Date.now()
+    const localSnap = getSnapshot(editor.store)
+    const localStore = localSnap.document?.store as Record<string, TLRecord> | undefined ?? {}
+
+    try {
+      isApplyingRemoteRef.current = true
+
+      const toUpsert: TLRecord[] = []
+      const toRemove: string[] = []
+
+      // Update/add all remote records, skipping locally-touched ones
+      for (const record of Object.values(remoteStore)) {
+        const id = (record as any).id as string
+        const touchedAt = localTouchedRef.current.get(id)
+        if (touchedAt && now - touchedAt < LOCAL_GUARD_MS) {
+          continue // protect in-progress local edits
+        }
+        toUpsert.push(record)
+      }
+
+      // Remove records that exist locally but were deleted from remote
+      // (only shapes — never remove page/document/asset records this way)
+      for (const [id, record] of Object.entries(localStore)) {
+        if ((record as any).typeName !== 'shape') continue
+        if (remoteStore[id]) continue // still exists in remote, handled above
+        const touchedAt = localTouchedRef.current.get(id)
+        if (touchedAt && now - touchedAt < LOCAL_GUARD_MS) continue // locally created, keep
+        toRemove.push(id)
+      }
+
+      const shapesMerged = toUpsert.filter((r: any) => r.typeName === 'shape').length
+      const shapesRemoved = toRemove.length
+
+      if (toUpsert.length > 0) editor.store.put(toUpsert)
+      if (toRemove.length > 0) editor.store.remove(toRemove as any[])
+
+      console.log('[Sinapsia] applyRemoteMerge OK', { boardId, shapesMerged, shapesRemoved, totalUpserted: toUpsert.length })
+      setSync('Online')
+    } catch (err) {
+      console.error('[Sinapsia] applyRemoteMerge failed, falling back to loadSnapshot:', err)
+      try { loadSnapshot(editor.store, remoteSnap) } catch (_) {}
+      setSync('Online')
+    } finally {
+      isApplyingRemoteRef.current = false
+    }
+  }, [boardId])
+
+  // Full snapshot replace — only used for the INITIAL load (no local edits yet)
   const applyRemoteSnapshot = useCallback((editor: Editor, snap: Partial<TLEditorSnapshot>) => {
     const shapeCount = countShapes(snap)
-    console.log('[Sinapsia] applyRemoteSnapshot', { boardId, shapeCount })
+    console.log('[Sinapsia] applyRemoteSnapshot (initial load)', { boardId, shapeCount })
     try {
       isApplyingRemoteRef.current = true
       loadSnapshot(editor.store, snap)
@@ -295,7 +359,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   // ── Write to Firebase ─────────────────────────────────────────────────────
   const writeToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
     if (!db || readOnly) {
-      // FIX: reset saveState so the button doesn't stay stuck on "Salvando…"
       setSaveState('idle')
       console.log('[Sinapsia] writeToFirebase skipped', { boardId, readOnly, dbConnected: Boolean(db) })
       return
@@ -354,9 +417,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     editorRef.current = editor
     console.log('[Sinapsia] handleMount', { boardId, readOnly, session: MY_SESSION, dbConnected: Boolean(db) })
 
-    if (readOnly) {
-      editor.updateInstanceState({ isReadonly: true })
-    }
+    if (readOnly) editor.updateInstanceState({ isReadonly: true })
 
     if (db) {
       console.log('[Sinapsia] Firebase initial load starting', { boardId })
@@ -369,19 +430,15 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
           const localShapeCount = countShapes(local)
 
           console.log('[Sinapsia] Firebase initial load result', {
-            boardId,
-            hasRemote: Boolean(remote),
-            remoteShapeCount,
-            localShapeCount,
-            lastSavedBy: data?.last_saved_by,
-            updatedAt: data?.updated_at,
+            boardId, hasRemote: Boolean(remote), remoteShapeCount,
+            localShapeCount, lastSavedBy: data?.last_saved_by, updatedAt: data?.updated_at,
           })
 
           if (!remote || remoteShapeCount === 0) {
-            console.log('[Sinapsia] Firebase initial load: no remote content, staying local', { boardId })
+            console.log('[Sinapsia] Firebase initial load: no remote content', { boardId })
             setSync('Online')
           } else if (!readOnly && localShapeCount > remoteShapeCount) {
-            console.log('[Sinapsia] Firebase initial load: local is newer, pushing to Firebase', { boardId, localShapeCount, remoteShapeCount })
+            console.log('[Sinapsia] Firebase initial load: local is newer, pushing', { boardId, localShapeCount, remoteShapeCount })
             await writeToFirebaseRef.current?.(local)
           } else {
             console.log('[Sinapsia] Firebase initial load: applying remote', { boardId, remoteShapeCount })
@@ -393,14 +450,10 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
           setSync('Local')
         })
         .finally(() => {
-          // Only enable writes AFTER the initial load is done.
-          // This prevents tldraw's own store init events from overwriting Firebase
-          // with an empty snapshot before the saved content is loaded.
           console.log('[Sinapsia] Firebase initial load complete — writes unblocked', { boardId })
           initializedRef.current = true
         })
     } else {
-      // No Firebase — unblock writes immediately (local-only mode)
       initializedRef.current = true
     }
 
@@ -408,7 +461,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       const debouncedWrite = debounce(() => {
         const currentEditor = editorRef.current
         if (!currentEditor) return
-        // FIX: skip writes until initial Firebase load is complete
         if (!initializedRef.current) {
           console.log('[Sinapsia] debouncedWrite blocked — not yet initialized', { boardId })
           return
@@ -416,10 +468,23 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         writeToFirebaseRef.current?.(getSnapshot(currentEditor.store))
       }, 400)
 
-      editor.store.listen(() => {
+      editor.store.listen((change) => {
         if (isApplyingRemoteRef.current) return
-        // FIX: don't show "Salvando…" during initialization phase
         if (!initializedRef.current) return
+
+        // Track which records the local user just modified so the merge can
+        // protect them from being overwritten by incoming remote snapshots
+        const now = Date.now()
+        for (const record of Object.values(change.changes.added ?? {})) {
+          const id = (record as any)?.id
+          if (id) localTouchedRef.current.set(id, now)
+        }
+        for (const entry of Object.values(change.changes.updated ?? {})) {
+          const to = Array.isArray(entry) ? entry[1] : entry
+          const id = (to as any)?.id
+          if (id) localTouchedRef.current.set(id, now)
+        }
+
         setSaveState('saving')
         debouncedWrite()
       }, { source: 'all' })
@@ -452,19 +517,23 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
       if (!data?.document_state) { setSync('Online'); return }
-      // Skip updates that we ourselves wrote
+      // Skip updates we ourselves wrote — we already have the latest
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
+
       const parsed = deserializeSnap(data.document_state)
       if (!parsed) { setSync('Online'); return }
-      console.log('[Sinapsia] onValue: received remote update', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
-      applyRemoteSnapshot(editorRef.current!, parsed)
+
+      const shapeCount = countShapes(parsed)
+      console.log('[Sinapsia] onValue: received remote update, merging', { boardId, shapeCount, from: data.last_saved_by })
+      // Use shape-level merge (not full replace) so in-progress local work is preserved
+      applyRemoteMerge(editorRef.current!, parsed)
     }, (err) => { console.error('[Sinapsia] onValue error:', err); setSync('Local') })
 
     return () => {
       console.log('[Sinapsia] onValue subscription cleanup', { boardId })
       off(boardRef)
     }
-  }, [applyRemoteSnapshot, editorReady, boardId, readOnly])
+  }, [applyRemoteMerge, editorReady, boardId, readOnly])
 
   // ── Cursor disconnect cleanup ─────────────────────────────────────────────
   useEffect(() => {
@@ -497,25 +566,12 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     ? Object.entries(otherCursors).map(([id, c]) => {
         const pt = editor.pageToScreen({ x: c.x, y: c.y })
         return (
-          <div
-            key={id}
-            className="pointer-events-none fixed z-[8999]"
-            style={{ left: pt.x - 2, top: pt.y - 2 }}
-          >
+          <div key={id} className="pointer-events-none fixed z-[8999]" style={{ left: pt.x - 2, top: pt.y - 2 }}>
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <path
-                d="M4 2L4 17L8 13L11 20L13.5 19L10.5 12L16 12L4 2Z"
-                fill={c.color}
-                stroke="white"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              />
+              <path d="M4 2L4 17L8 13L11 20L13.5 19L10.5 12L16 12L4 2Z" fill={c.color} stroke="white" strokeWidth="1.5" strokeLinejoin="round" />
             </svg>
             {c.name && (
-              <div
-                className="absolute left-5 top-0.5 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold text-white shadow"
-                style={{ backgroundColor: c.color }}
-              >
+              <div className="absolute left-5 top-0.5 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold text-white shadow" style={{ backgroundColor: c.color }}>
                 {c.name}
               </div>
             )}
