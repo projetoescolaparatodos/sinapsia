@@ -8,41 +8,47 @@ export default function HomePage() {
   const [, navigate] = useLocation()
   const [loading, setLoading] = useState(false)
   const [boardInput, setBoardInput] = useState('')
+  const [inputError, setInputError] = useState(false)
 
   const createNewBoard = async () => {
     setLoading(true)
     const id = uuidv4()
-
     if (db) {
       try {
         await set(ref(db, `boards/${id}`), {
           document_state: null,
           updated_at: serverTimestamp(),
         })
-      } catch {
-        // Continua mesmo sem Firebase — modo local
-      }
+      } catch { /* modo local */ }
     }
-
     navigate(`/b/${id}`)
   }
 
   const openBoard = () => {
     const value = boardInput.trim()
-    if (!value) return
+    if (!value) { setInputError(true); return }
+    setInputError(false)
 
+    let boardId = value
+
+    // Try extracting from a full URL
     try {
       const parsed = new URL(value)
-      const pathId = parsed.pathname.split('/b/')[1]?.split('/')[0]
-      navigate(pathId ? `/b/${pathId}${parsed.search}` : `/b/${value}`)
+      const match = parsed.pathname.match(/\/b\/([^/?#]+)/)
+      if (match) {
+        boardId = match[1] + (parsed.search || '')
+      }
     } catch {
-      navigate(`/b/${value}`)
+      // Not a URL — treat as raw ID
     }
+
+    navigate(`/b/${boardId}`)
   }
 
   return (
     <main className="min-h-screen bg-[#f7f8fa] text-neutral-950">
       <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-5 py-5 sm:px-8">
+
         <header className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <SinapsiaMark />
@@ -51,7 +57,6 @@ export default function HomePage() {
               <p className="text-xs text-neutral-500">Mapas conceituais</p>
             </div>
           </div>
-
           <span className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs font-medium text-neutral-600 shadow-sm">
             {isFirebaseConfigured ? 'Multiplayer ativo' : 'Modo local'}
           </span>
@@ -66,7 +71,6 @@ export default function HomePage() {
               Uma tela infinita para pensar, desenhar, conectar ideias e
               compartilhar mapas por link, sem cadastro.
             </p>
-
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <button
                 onClick={createNewBoard}
@@ -86,18 +90,27 @@ export default function HomePage() {
             </div>
           </div>
 
-          <div id="abrir" className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm">
-            <label className="text-sm font-semibold text-neutral-900" htmlFor="board-link">
-              Abrir mapa
+          <div
+            id="abrir"
+            className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm"
+          >
+            <label
+              className="text-sm font-semibold text-neutral-900"
+              htmlFor="board-link"
+            >
+              Abrir mapa existente
             </label>
+            <p className="mt-0.5 text-xs text-neutral-500">
+              Cole o link completo ou só o ID do mapa.
+            </p>
             <div className="mt-3 flex gap-2">
               <input
                 id="board-link"
                 value={boardInput}
-                onChange={(e) => setBoardInput(e.target.value)}
+                onChange={(e) => { setBoardInput(e.target.value); setInputError(false) }}
                 onKeyDown={(e) => { if (e.key === 'Enter') openBoard() }}
-                placeholder="Cole um link ou ID"
-                className="h-11 min-w-0 flex-1 rounded-lg border border-neutral-300 px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950"
+                placeholder="https://… ou ID do mapa"
+                className={`h-11 min-w-0 flex-1 rounded-lg border px-3 text-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-950 ${inputError ? 'border-red-400 bg-red-50' : 'border-neutral-300'}`}
               />
               <button
                 onClick={openBoard}
@@ -107,13 +120,16 @@ export default function HomePage() {
                 <ArrowRight size={18} />
               </button>
             </div>
+            {inputError && (
+              <p className="mt-1.5 text-xs text-red-500">Cole um link ou ID válido.</p>
+            )}
 
             <div className="mt-5 grid gap-3">
               <Feature icon={<PenLine size={18} />} title="Desenho touch">
                 Caneta, dedo, texto, setas, formas e cores no canvas.
               </Feature>
-              <Feature icon={<Share2 size={18} />} title="Links de acesso">
-                Gere links para editar ou apenas visualizar.
+              <Feature icon={<Share2 size={18} />} title="Cursores em tempo real">
+                Veja onde cada colaborador está trabalhando no mapa.
               </Feature>
               <Feature icon={<ExternalLink size={18} />} title="Mídias leves">
                 Arraste imagens e GIFs ou cole URLs diretamente no canvas.
@@ -127,9 +143,7 @@ export default function HomePage() {
 }
 
 function Feature({ icon, title, children }: {
-  icon: React.ReactNode
-  title: string
-  children: React.ReactNode
+  icon: React.ReactNode; title: string; children: React.ReactNode
 }) {
   return (
     <div className="rounded-lg border border-neutral-200 bg-[#fbfbfc] p-3">

@@ -3,8 +3,10 @@ import {
   getDatabase,
   ref,
   set,
+  get,
   onValue,
   off,
+  onDisconnect,
   serverTimestamp,
   type Database,
 } from 'firebase/database'
@@ -36,12 +38,11 @@ if (isFirebaseConfigured) {
           appId,
         })
       : getApps()[0]
-
     db = getDatabase(app)
   } catch (err) {
-    console.warn('[Sinapsia] Firebase init error — rodando em modo local:', err)
+    console.warn('[Sinapsia] Firebase init error — modo local:', err)
     db = null
   }
 }
 
-export { db, ref, set, onValue, off, serverTimestamp }
+export { db, ref, set, get, onValue, off, onDisconnect, serverTimestamp }

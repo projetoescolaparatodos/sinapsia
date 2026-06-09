@@ -8,13 +8,16 @@ import {
   Tldraw,
 } from 'tldraw'
 import 'tldraw/tldraw.css'
-import { db, ref, set, onValue, off, serverTimestamp } from '@/lib/firebase'
+import { Link, useLocation } from 'wouter'
+import { Copy, Eye, Home, Network, PenLine, Share2, X } from 'lucide-react'
+import { db, ref, set, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 
-interface CanvasProps {
-  boardId: string
-  readOnly?: boolean
-}
+// ── Identity & colors ───────────────────────────────────────────────────────
+const MY_SESSION = Math.random().toString(36).slice(2, 10)
+const CURSOR_COLORS = ['#e03131', '#2f9e44', '#1971c2', '#ae3ec9', '#f08c00', '#0ca678']
+const MY_COLOR = CURSOR_COLORS[parseInt(MY_SESSION.slice(0, 2), 36) % CURSOR_COLORS.length]
 
+// ── Cloudinary upload ───────────────────────────────────────────────────────
 const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'di3lqsxxc'
 const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'sinapsia_unsigned'
 
@@ -22,7 +25,6 @@ async function uploadToCloudinary(file: File): Promise<string> {
   const form = new FormData()
   form.append('file', file)
   form.append('upload_preset', UPLOAD_PRESET)
-
   const res = await fetch(
     `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/auto/upload`,
     { method: 'POST', body: form }
@@ -33,120 +35,309 @@ async function uploadToCloudinary(file: File): Promise<string> {
 }
 
 const assetStore: TLAssetStore = {
-  async upload(_asset, file) {
-    return await uploadToCloudinary(file)
-  },
-  resolve(asset) {
-    return asset.props.src ?? null
-  },
+  async upload(_asset, file) { return uploadToCloudinary(file) },
+  resolve(asset) { return asset.props.src ?? null },
 }
 
+// ── Utils ───────────────────────────────────────────────────────────────────
 function debounce<T extends (...args: Parameters<T>) => void>(fn: T, ms: number): T {
   let t: ReturnType<typeof setTimeout>
+  return ((...args: Parameters<T>) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms) }) as T
+}
+
+function throttle<T extends (...args: Parameters<T>) => void>(fn: T, ms: number): T {
+  let last = 0
   return ((...args: Parameters<T>) => {
-    clearTimeout(t)
-    t = setTimeout(() => fn(...args), ms)
+    const now = Date.now(); if (now - last >= ms) { last = now; fn(...args) }
   }) as T
 }
 
-type SyncState = 'Conectando' | 'Online' | 'Local' | 'Somente leitura'
+// ── Types ───────────────────────────────────────────────────────────────────
+interface CursorData { x: number; y: number; color: string; ts: number }
+interface CanvasProps { boardId: string; readOnly?: boolean }
 
+// ── Share panel (rendered inside tldraw's top-right slot) ───────────────────
+function SharePanel({
+  boardId,
+  readOnly,
+  sync,
+}: {
+  boardId: string
+  readOnly: boolean
+  sync: string
+}) {
+  const [, navigate] = useLocation()
+  const [showShare, setShowShare] = useState(false)
+  const [copied, setCopied] = useState<'edit' | 'view' | null>(null)
+
+  const copyLink = async (type: 'edit' | 'view') => {
+    const origin = window.location.origin
+    const link = type === 'edit'
+      ? `${origin}/b/${boardId}`
+      : `${origin}/b/${boardId}?mode=view`
+    await navigator.clipboard.writeText(link)
+    setCopied(type)
+    setTimeout(() => setCopied(null), 1600)
+  }
+
+  const syncColor =
+    sync === 'Online' ? '#0ca678' : sync === 'Local' ? '#868e96' : '#adb5bd'
+
+  return (
+    <div className="flex items-center gap-2 px-2 py-1.5">
+      {/* Sync badge */}
+      <span
+        className="flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2 py-0.5 text-xs font-semibold shadow-sm backdrop-blur"
+        style={{ color: syncColor }}
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: syncColor }} />
+        {readOnly ? 'Somente leitura' : sync}
+      </span>
+
+      {readOnly && (
+        <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur">
+          <Eye size={15} />
+          Visualização
+        </span>
+      )}
+
+      {!readOnly && (
+        <div className="relative">
+          <button
+            onClick={() => setShowShare((v) => !v)}
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-800 shadow-sm backdrop-blur transition hover:bg-white"
+          >
+            <Share2 size={15} />
+            Compartilhar
+          </button>
+
+          {showShare && (
+            <>
+              {/* backdrop */}
+              <button
+                className="fixed inset-0 z-40 cursor-default"
+                onClick={() => setShowShare(false)}
+                aria-label="Fechar"
+              />
+              <div className="absolute right-0 top-full z-50 mt-2 w-80 rounded-lg border border-neutral-200 bg-white p-3 shadow-xl">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-sm font-semibold text-neutral-900">Links do mapa</p>
+                  <button
+                    onClick={() => setShowShare(false)}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+                <ShareRow
+                  icon={<PenLine size={16} />}
+                  label="Edição"
+                  description="Qualquer pessoa com o link pode editar."
+                  onCopy={() => copyLink('edit')}
+                  copied={copied === 'edit'}
+                />
+                <ShareRow
+                  icon={<Eye size={16} />}
+                  label="Visualização"
+                  description="Abre o mapa em modo somente leitura."
+                  onCopy={() => copyLink('view')}
+                  copied={copied === 'view'}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <button
+        onClick={() => navigate('/')}
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
+      >
+        <Home size={15} />
+        Sinapsia
+      </button>
+    </div>
+  )
+}
+
+function ShareRow({
+  icon, label, description, onCopy, copied,
+}: {
+  icon: React.ReactNode; label: string; description: string; onCopy: () => void; copied: boolean
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-neutral-100 py-3 first:border-t-0">
+      <div className="flex min-w-0 items-start gap-2">
+        <span className="mt-0.5 text-[#0f766e]">{icon}</span>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-neutral-900">{label}</p>
+          <p className="text-xs leading-5 text-neutral-500">{description}</p>
+        </div>
+      </div>
+      <button
+        onClick={onCopy}
+        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-neutral-950 px-3 text-xs font-semibold text-white transition hover:bg-neutral-800"
+      >
+        <Copy size={14} />
+        {copied ? 'Copiado!' : 'Copiar'}
+      </button>
+    </div>
+  )
+}
+
+// ── Canvas (main component) ─────────────────────────────────────────────────
 export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
-  const isApplyingRemote = useRef(false)
+  const [editorReady, setEditorReady] = useState(false)
   const debouncedSave = useRef<((snap: TLEditorSnapshot) => void) | null>(null)
-  const [sync, setSync] = useState<SyncState>(
-    readOnly ? 'Somente leitura' : db ? 'Conectando' : 'Local'
-  )
+  const throttledCursor = useRef<((x: number, y: number) => void) | null>(null)
+  const [sync, setSync] = useState<string>(db ? 'Conectando' : 'Local')
+  const [otherCursors, setOtherCursors] = useState<Record<string, CursorData>>({})
+  const [, setTick] = useState(0)
 
-  // ── Save to Firebase ─────────────────────────────────────────────────────
-  const saveToFirebase = useCallback(
-    async (snap: TLEditorSnapshot) => {
-      if (!db || isApplyingRemote.current || readOnly) return
-      try {
-        await set(ref(db, `boards/${boardId}`), {
-          document_state: snap,
-          updated_at: serverTimestamp(),
-        })
-        setSync('Online')
-      } catch {
-        setSync('Local')
-      }
-    },
-    [boardId, readOnly]
-  )
+  // ── Save to Firebase ──────────────────────────────────────────────────────
+  const saveToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
+    if (!db || readOnly) return
+    try {
+      await set(ref(db, `boards/${boardId}`), {
+        document_state: snap,
+        last_saved_by: MY_SESSION,
+        updated_at: serverTimestamp(),
+      })
+      setSync('Online')
+    } catch { setSync('Local') }
+  }, [boardId, readOnly])
 
   useEffect(() => {
     debouncedSave.current = debounce(saveToFirebase, 300)
     return () => { debouncedSave.current = null }
   }, [saveToFirebase])
 
-  // ── Load + subscribe to Firebase ─────────────────────────────────────────
-  const subscribe = useCallback(
-    (editor: Editor) => {
-      if (!db) return
+  // ── Mount ─────────────────────────────────────────────────────────────────
+  const handleMount = useCallback((editor: Editor) => {
+    editorRef.current = editor
 
-      const boardRef = ref(db, `boards/${boardId}/document_state`)
+    if (readOnly) {
+      editor.updateInstanceState({ isReadonly: true })
+    }
 
-      onValue(
-        boardRef,
-        (snapshot) => {
-          const data = snapshot.val()
-          if (data && !isApplyingRemote.current) {
-            try {
-              isApplyingRemote.current = true
-              loadSnapshot(editor.store, data as Partial<TLEditorSnapshot>)
-            } finally {
-              isApplyingRemote.current = false
-            }
+    // Initial fetch from Firebase
+    if (db) {
+      get(ref(db, `boards/${boardId}`))
+        .then((snap) => {
+          const data = snap.val()
+          if (data?.document_state) {
+            try { loadSnapshot(editor.store, data.document_state as Partial<TLEditorSnapshot>) } catch { /* ok */ }
           }
           setSync('Online')
-        },
-        () => {
-          // Firebase unreachable (DB not enabled or bad URL) — silent fallback
-          setSync('Local')
-        }
-      )
+        })
+        .catch(() => setSync('Local'))
+    }
 
-      return () => {
-        off(boardRef)
+    // Save on user edits
+    if (!readOnly) {
+      editor.store.listen(() => {
+        const snap = getSnapshot(editor.store)
+        debouncedSave.current?.(snap)
+      }, { source: 'user', scope: 'document' })
+    }
+
+    // Cursor throttle
+    throttledCursor.current = throttle((x: number, y: number) => {
+      if (!db || readOnly) return
+      set(ref(db, `cursors/${boardId}/${MY_SESSION}`), {
+        x, y, color: MY_COLOR, ts: Date.now(),
+      }).catch(() => {})
+    }, 50)
+
+    editor.store.listen(() => {
+      const pt = editor.inputs.currentPagePoint
+      if (pt) throttledCursor.current?.(pt.x, pt.y)
+    }, { source: 'user' })
+
+    // Trigger cursor re-render on viewport change
+    editor.store.listen(() => setTick((n) => n + 1), { source: 'all' })
+
+    setEditorReady(true)
+  }, [boardId, readOnly])
+
+  // ── Real-time board sync ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (!editorReady || !db || !editorRef.current) return
+    const boardRef = ref(db, `boards/${boardId}`)
+
+    onValue(boardRef, (snapshot) => {
+      const data = snapshot.val()
+      if (!data?.document_state) { setSync('Online'); return }
+      if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
+      try {
+        loadSnapshot(editorRef.current!.store, data.document_state as Partial<TLEditorSnapshot>)
+        setSync('Online')
+      } catch { setSync('Local') }
+    }, () => setSync('Local'))
+
+    return () => off(boardRef)
+  }, [editorReady, boardId, readOnly])
+
+  // ── Cursor presence cleanup ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!editorReady || !db || readOnly) return
+    const cursorRef = ref(db, `cursors/${boardId}/${MY_SESSION}`)
+    onDisconnect(cursorRef).remove()
+    return () => { set(cursorRef, null).catch(() => {}) }
+  }, [editorReady, boardId, readOnly])
+
+  // ── Other cursors subscription ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!db) return
+    const cursorsRef = ref(db, `cursors/${boardId}`)
+    onValue(cursorsRef, (snapshot) => {
+      const all = snapshot.val() as Record<string, CursorData> | null
+      if (!all) { setOtherCursors({}); return }
+      const others: Record<string, CursorData> = {}
+      for (const [id, c] of Object.entries(all)) {
+        if (id !== MY_SESSION && Date.now() - c.ts < 8000) others[id] = c
       }
-    },
-    [boardId]
-  )
+      setOtherCursors(others)
+    })
+    return () => off(ref(db!, `cursors/${boardId}`))
+  }, [boardId])
 
-  // ── Mount ─────────────────────────────────────────────────────────────────
-  const handleMount = useCallback(
-    (editor: Editor) => {
-      editorRef.current = editor
+  // ── Build tldraw components (stable refs) ──────────────────────────────────
+  const syncRef = useRef(sync)
+  syncRef.current = sync
 
-      if (readOnly) {
-        editor.updateInstanceState({ isReadonly: true })
-        setSync('Somente leitura')
-        subscribe(editor)
-        return
-      }
+  const [syncForPanel, setSyncForPanel] = useState(sync)
+  useEffect(() => { setSyncForPanel(sync) }, [sync])
 
-      const unsub = subscribe(editor)
+  const TldrawSharePanel = useCallback(() => (
+    <SharePanel boardId={boardId} readOnly={readOnly} sync={syncForPanel} />
+  ), [boardId, readOnly, syncForPanel])
 
-      editor.store.listen(
-        () => {
-          const snap = getSnapshot(editor.store)
-          debouncedSave.current?.(snap)
-        },
-        { source: 'user', scope: 'document' }
-      )
-
-      return () => unsub?.()
-    },
-    [subscribe, readOnly]
-  )
-
-  const syncColor =
-    sync === 'Online' ? 'text-emerald-600'
-    : sync === 'Local' ? 'text-neutral-500'
-    : sync === 'Somente leitura' ? 'text-amber-600'
-    : 'text-neutral-400'
+  // ── Cursor screen positions ───────────────────────────────────────────────
+  const editor = editorRef.current
+  const cursorElements = editor
+    ? Object.entries(otherCursors).map(([id, c]) => {
+        const pt = editor.pageToScreen({ x: c.x, y: c.y })
+        return (
+          <div
+            key={id}
+            className="pointer-events-none fixed z-[9999]"
+            style={{ left: pt.x - 2, top: pt.y - 2 }}
+          >
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <path
+                d="M4 2L4 17L8 13L11 20L13.5 19L10.5 12L16 12L4 2Z"
+                fill={c.color}
+                stroke="white"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+        )
+      })
+    : []
 
   return (
     <div className="fixed inset-0">
@@ -154,14 +345,10 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
         autoFocus
         onMount={handleMount}
         assets={assetStore}
-        persistenceKey={`sinapsia-${boardId}`}
+        persistenceKey={db ? undefined : `sinapsia-local-${boardId}`}
+        components={{ SharePanel: TldrawSharePanel }}
       />
-
-      <div
-        className={`pointer-events-none fixed bottom-3 right-3 z-50 rounded-lg border border-black/10 bg-white/90 px-2.5 py-1.5 text-xs font-semibold shadow-sm backdrop-blur ${syncColor}`}
-      >
-        {sync}
-      </div>
+      {cursorElements}
     </div>
   )
 }
