@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import {
   type Editor,
   type TLEditorSnapshot,
@@ -8,16 +15,17 @@ import {
   Tldraw,
 } from 'tldraw'
 import 'tldraw/tldraw.css'
-import { Link, useLocation } from 'wouter'
-import { Copy, Eye, Home, Network, PenLine, Share2, X } from 'lucide-react'
+import { useLocation } from 'wouter'
+import { Copy, Eye, Home, PenLine, Share2, X } from 'lucide-react'
 import { db, ref, set, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
+import type { SinapUser } from '@/lib/auth'
 
-// ── Identity & colors ───────────────────────────────────────────────────────
+// ── Session identity (stable per browser tab) ────────────────────────────────
 const MY_SESSION = Math.random().toString(36).slice(2, 10)
 const CURSOR_COLORS = ['#e03131', '#2f9e44', '#1971c2', '#ae3ec9', '#f08c00', '#0ca678']
 const MY_COLOR = CURSOR_COLORS[parseInt(MY_SESSION.slice(0, 2), 36) % CURSOR_COLORS.length]
 
-// ── Cloudinary upload ───────────────────────────────────────────────────────
+// ── Cloudinary upload ─────────────────────────────────────────────────────────
 const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'di3lqsxxc'
 const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'sinapsia_unsigned'
 
@@ -39,12 +47,13 @@ const assetStore: TLAssetStore = {
   resolve(asset) { return asset.props.src ?? null },
 }
 
-// ── Utils ───────────────────────────────────────────────────────────────────
+// ── Utils ─────────────────────────────────────────────────────────────────────
 function debounce<T extends (...args: Parameters<T>) => void>(fn: T, ms: number): T {
   let t: ReturnType<typeof setTimeout>
-  return ((...args: Parameters<T>) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms) }) as T
+  return ((...args: Parameters<T>) => {
+    clearTimeout(t); t = setTimeout(() => fn(...args), ms)
+  }) as T
 }
-
 function throttle<T extends (...args: Parameters<T>) => void>(fn: T, ms: number): T {
   let last = 0
   return ((...args: Parameters<T>) => {
@@ -52,48 +61,61 @@ function throttle<T extends (...args: Parameters<T>) => void>(fn: T, ms: number)
   }) as T
 }
 
-// ── Types ───────────────────────────────────────────────────────────────────
-interface CursorData { x: number; y: number; color: string; ts: number }
-interface CanvasProps { boardId: string; readOnly?: boolean }
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface CursorData { x: number; y: number; color: string; ts: number; name?: string }
+interface CanvasProps { boardId: string; readOnly?: boolean; user?: SinapUser | null }
 
-// ── Share panel (rendered inside tldraw's top-right slot) ───────────────────
-function SharePanel({
-  boardId,
-  readOnly,
-  sync,
-}: {
+// ── SharePanel context ── defined OUTSIDE Canvas for stable reference ─────────
+interface ShareCtxValue {
   boardId: string
   readOnly: boolean
   sync: string
-}) {
+  user: SinapUser | null
+}
+const ShareCtx = createContext<ShareCtxValue>({
+  boardId: '', readOnly: false, sync: 'Local', user: null,
+})
+
+// Inline share panel — full dropdown logic, stable state
+function SharePanelInner({ boardId, readOnly, sync, user }: ShareCtxValue) {
   const [, navigate] = useLocation()
   const [showShare, setShowShare] = useState(false)
   const [copied, setCopied] = useState<'edit' | 'view' | null>(null)
 
   const copyLink = async (type: 'edit' | 'view') => {
-    const origin = window.location.origin
     const link = type === 'edit'
-      ? `${origin}/b/${boardId}`
-      : `${origin}/b/${boardId}?mode=view`
+      ? `${window.location.origin}/b/${boardId}`
+      : `${window.location.origin}/b/${boardId}?mode=view`
     await navigator.clipboard.writeText(link)
     setCopied(type)
     setTimeout(() => setCopied(null), 1600)
   }
 
-  const syncColor =
-    sync === 'Online' ? '#0ca678' : sync === 'Local' ? '#868e96' : '#adb5bd'
+  const dot = sync === 'Online' ? '#0ca678' : sync === 'Local' ? '#868e96' : '#adb5bd'
 
   return (
     <div className="flex items-center gap-2 px-2 py-1.5">
       {/* Sync badge */}
       <span
         className="flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2 py-0.5 text-xs font-semibold shadow-sm backdrop-blur"
-        style={{ color: syncColor }}
+        style={{ color: dot }}
       >
-        <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: syncColor }} />
+        <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot }} />
         {readOnly ? 'Somente leitura' : sync}
       </span>
 
+      {/* User name badge */}
+      {user && !readOnly && (
+        <span className="hidden items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-2 py-0.5 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur sm:flex">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full border border-white"
+            style={{ backgroundColor: MY_COLOR }}
+          />
+          {user.name}
+        </span>
+      )}
+
+      {/* View-only badge */}
       {readOnly && (
         <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur">
           <Eye size={15} />
@@ -101,11 +123,12 @@ function SharePanel({
         </span>
       )}
 
+      {/* Share dropdown */}
       {!readOnly && (
         <div className="relative">
           <button
-            onClick={() => setShowShare((v) => !v)}
-            className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-800 shadow-sm backdrop-blur transition hover:bg-white"
+            onPointerDown={(e) => { e.stopPropagation(); setShowShare((v) => !v) }}
+            className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-800 shadow-sm backdrop-blur transition hover:bg-white"
           >
             <Share2 size={15} />
             Compartilhar
@@ -113,18 +136,17 @@ function SharePanel({
 
           {showShare && (
             <>
-              {/* backdrop */}
               <button
-                className="fixed inset-0 z-40 cursor-default"
-                onClick={() => setShowShare(false)}
+                className="fixed inset-0 z-[100] cursor-default"
+                onPointerDown={(e) => { e.stopPropagation(); setShowShare(false) }}
                 aria-label="Fechar"
               />
-              <div className="absolute right-0 top-full z-50 mt-2 w-80 rounded-lg border border-neutral-200 bg-white p-3 shadow-xl">
+              <div className="absolute right-0 top-full z-[101] mt-2 w-80 rounded-lg border border-neutral-200 bg-white p-3 shadow-xl">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-sm font-semibold text-neutral-900">Links do mapa</p>
                   <button
-                    onClick={() => setShowShare(false)}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
+                    onPointerDown={(e) => { e.stopPropagation(); setShowShare(false) }}
+                    className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900"
                   >
                     <X size={15} />
                   </button>
@@ -149,21 +171,34 @@ function SharePanel({
         </div>
       )}
 
+      {/* Home button */}
       <button
-        onClick={() => navigate('/')}
-        className="inline-flex h-9 items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
+        onPointerDown={(e) => { e.stopPropagation(); navigate('/') }}
+        className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-black/10 bg-white/90 px-3 text-xs font-semibold text-neutral-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-neutral-950"
       >
         <Home size={15} />
-        Sinapsia
+        Início
       </button>
     </div>
   )
 }
 
+// SharePanelSlot: stable reference (defined outside Canvas, reads from context)
+// tldraw renders this inside its own layout — the context propagates correctly
+// because Tldraw is a React child of our ShareCtx.Provider
+function SharePanelSlot() {
+  const ctx = useContext(ShareCtx)
+  return <SharePanelInner {...ctx} />
+}
+
+// Stable tldraw components object — never changes reference
+const TLDRAW_COMPONENTS = { SharePanel: SharePanelSlot }
+
 function ShareRow({
   icon, label, description, onCopy, copied,
 }: {
-  icon: React.ReactNode; label: string; description: string; onCopy: () => void; copied: boolean
+  icon: React.ReactNode; label: string; description: string
+  onCopy: () => void; copied: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-3 border-t border-neutral-100 py-3 first:border-t-0">
@@ -175,8 +210,8 @@ function ShareRow({
         </div>
       </div>
       <button
-        onClick={onCopy}
-        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-neutral-950 px-3 text-xs font-semibold text-white transition hover:bg-neutral-800"
+        onPointerDown={(e) => { e.stopPropagation(); onCopy() }}
+        className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-neutral-950 px-3 text-xs font-semibold text-white transition hover:bg-neutral-800"
       >
         <Copy size={14} />
         {copied ? 'Copiado!' : 'Copiar'}
@@ -185,17 +220,24 @@ function ShareRow({
   )
 }
 
-// ── Canvas (main component) ─────────────────────────────────────────────────
-export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
+// ── Canvas component ──────────────────────────────────────────────────────────
+export default function Canvas({ boardId, readOnly = false, user = null }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
   const [editorReady, setEditorReady] = useState(false)
-  const debouncedSave = useRef<((snap: TLEditorSnapshot) => void) | null>(null)
-  const throttledCursor = useRef<((x: number, y: number) => void) | null>(null)
+  const debouncedSaveRef = useRef<((snap: TLEditorSnapshot) => void) | null>(null)
+  const throttledCursorRef = useRef<((x: number, y: number) => void) | null>(null)
+  const userNameRef = useRef<string>(user?.name || 'Anônimo')
+  const lastLocalEditRef = useRef<number>(0)
   const [sync, setSync] = useState<string>(db ? 'Conectando' : 'Local')
   const [otherCursors, setOtherCursors] = useState<Record<string, CursorData>>({})
   const [, setTick] = useState(0)
 
-  // ── Save to Firebase ──────────────────────────────────────────────────────
+  // Keep userNameRef in sync with user prop
+  useEffect(() => {
+    userNameRef.current = user?.name || 'Anônimo'
+  }, [user])
+
+  // ── Save to Firebase ─────────────────────────────────────────────────────
   const saveToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
     if (!db || readOnly) return
     try {
@@ -209,59 +251,59 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
   }, [boardId, readOnly])
 
   useEffect(() => {
-    debouncedSave.current = debounce(saveToFirebase, 300)
-    return () => { debouncedSave.current = null }
+    debouncedSaveRef.current = debounce(saveToFirebase, 300)
+    return () => { debouncedSaveRef.current = null }
   }, [saveToFirebase])
 
-  // ── Mount ─────────────────────────────────────────────────────────────────
+  // ── Mount ────────────────────────────────────────────────────────────────
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
 
     if (readOnly) {
       editor.updateInstanceState({ isReadonly: true })
+      // View-only: fetch initial state from Firebase (IndexedDB may be empty)
+      if (db) {
+        get(ref(db, `boards/${boardId}`))
+          .then((snap) => {
+            const data = snap.val()
+            if (data?.document_state) {
+              try { loadSnapshot(editor.store, data.document_state as Partial<TLEditorSnapshot>) } catch { /* ok */ }
+            }
+            setSync('Online')
+          })
+          .catch(() => setSync('Local'))
+      }
     }
 
-    // Initial fetch from Firebase
-    if (db) {
-      get(ref(db, `boards/${boardId}`))
-        .then((snap) => {
-          const data = snap.val()
-          if (data?.document_state) {
-            try { loadSnapshot(editor.store, data.document_state as Partial<TLEditorSnapshot>) } catch { /* ok */ }
-          }
-          setSync('Online')
-        })
-        .catch(() => setSync('Local'))
-    }
-
-    // Save on user edits
+    // Edit mode: listen to user changes and save
     if (!readOnly) {
       editor.store.listen(() => {
+        lastLocalEditRef.current = Date.now()
         const snap = getSnapshot(editor.store)
-        debouncedSave.current?.(snap)
+        debouncedSaveRef.current?.(snap)
       }, { source: 'user', scope: 'document' })
     }
 
-    // Cursor throttle
-    throttledCursor.current = throttle((x: number, y: number) => {
+    // Cursor broadcast (throttled 50ms)
+    throttledCursorRef.current = throttle((x: number, y: number) => {
       if (!db || readOnly) return
       set(ref(db, `cursors/${boardId}/${MY_SESSION}`), {
-        x, y, color: MY_COLOR, ts: Date.now(),
+        x, y, color: MY_COLOR, ts: Date.now(), name: userNameRef.current,
       }).catch(() => {})
     }, 50)
 
     editor.store.listen(() => {
       const pt = editor.inputs.currentPagePoint
-      if (pt) throttledCursor.current?.(pt.x, pt.y)
+      if (pt) throttledCursorRef.current?.(pt.x, pt.y)
     }, { source: 'user' })
 
-    // Trigger cursor re-render on viewport change
+    // Re-render cursor screen positions on any viewport change
     editor.store.listen(() => setTick((n) => n + 1), { source: 'all' })
 
     setEditorReady(true)
   }, [boardId, readOnly])
 
-  // ── Real-time board sync ───────────────────────────────────────────────────
+  // ── Real-time board sync ─────────────────────────────────────────────────
   useEffect(() => {
     if (!editorReady || !db || !editorRef.current) return
     const boardRef = ref(db, `boards/${boardId}`)
@@ -269,7 +311,15 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
       if (!data?.document_state) { setSync('Online'); return }
+
+      // Skip our own echo
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
+
+      // In edit mode, skip if user was editing in last 1.5s (protect local work)
+      if (!readOnly && Date.now() - lastLocalEditRef.current < 1500) {
+        setSync('Online'); return
+      }
+
       try {
         loadSnapshot(editorRef.current!.store, data.document_state as Partial<TLEditorSnapshot>)
         setSync('Online')
@@ -279,7 +329,7 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
     return () => off(boardRef)
   }, [editorReady, boardId, readOnly])
 
-  // ── Cursor presence cleanup ────────────────────────────────────────────────
+  // ── Cursor disconnect cleanup ────────────────────────────────────────────
   useEffect(() => {
     if (!editorReady || !db || readOnly) return
     const cursorRef = ref(db, `cursors/${boardId}/${MY_SESSION}`)
@@ -287,7 +337,7 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
     return () => { set(cursorRef, null).catch(() => {}) }
   }, [editorReady, boardId, readOnly])
 
-  // ── Other cursors subscription ─────────────────────────────────────────────
+  // ── Other cursors subscription ───────────────────────────────────────────
   useEffect(() => {
     if (!db) return
     const cursorsRef = ref(db, `cursors/${boardId}`)
@@ -295,26 +345,16 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
       const all = snapshot.val() as Record<string, CursorData> | null
       if (!all) { setOtherCursors({}); return }
       const others: Record<string, CursorData> = {}
+      const now = Date.now()
       for (const [id, c] of Object.entries(all)) {
-        if (id !== MY_SESSION && Date.now() - c.ts < 8000) others[id] = c
+        if (id !== MY_SESSION && now - c.ts < 8000) others[id] = c
       }
       setOtherCursors(others)
     })
     return () => off(ref(db!, `cursors/${boardId}`))
   }, [boardId])
 
-  // ── Build tldraw components (stable refs) ──────────────────────────────────
-  const syncRef = useRef(sync)
-  syncRef.current = sync
-
-  const [syncForPanel, setSyncForPanel] = useState(sync)
-  useEffect(() => { setSyncForPanel(sync) }, [sync])
-
-  const TldrawSharePanel = useCallback(() => (
-    <SharePanel boardId={boardId} readOnly={readOnly} sync={syncForPanel} />
-  ), [boardId, readOnly, syncForPanel])
-
-  // ── Cursor screen positions ───────────────────────────────────────────────
+  // ── Render cursor overlays ───────────────────────────────────────────────
   const editor = editorRef.current
   const cursorElements = editor
     ? Object.entries(otherCursors).map(([id, c]) => {
@@ -334,21 +374,31 @@ export default function Canvas({ boardId, readOnly = false }: CanvasProps) {
                 strokeLinejoin="round"
               />
             </svg>
+            {c.name && (
+              <div
+                className="absolute left-5 top-0.5 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold text-white shadow"
+                style={{ backgroundColor: c.color }}
+              >
+                {c.name}
+              </div>
+            )}
           </div>
         )
       })
     : []
 
   return (
-    <div className="fixed inset-0">
-      <Tldraw
-        autoFocus
-        onMount={handleMount}
-        assets={assetStore}
-        persistenceKey={db ? undefined : `sinapsia-local-${boardId}`}
-        components={{ SharePanel: TldrawSharePanel }}
-      />
-      {cursorElements}
-    </div>
+    <ShareCtx.Provider value={{ boardId, readOnly, sync, user }}>
+      <div className="fixed inset-0">
+        <Tldraw
+          autoFocus
+          onMount={handleMount}
+          assets={assetStore}
+          persistenceKey={`sinapsia-${boardId}`}
+          components={TLDRAW_COMPONENTS}
+        />
+        {cursorElements}
+      </div>
+    </ShareCtx.Provider>
   )
 }
