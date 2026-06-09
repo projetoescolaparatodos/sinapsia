@@ -1,0 +1,2 @@
+- [tldraw-v5-store-mutation](tldraw-v5-store-mutation.md) — never call editor.store.put()/remove() directly in tldraw v5; use loadSnapshot for safe remote updates
+- [firebase-race-condition-fix](firebase-race-condition-fix.md) — initializedRef pattern blocks writes until Firebase initial load completes, preventing tldraw init events from overwriting saved data

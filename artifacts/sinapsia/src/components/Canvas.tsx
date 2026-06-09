@@ -9,7 +9,6 @@ import {
   type Editor,
   type TLEditorSnapshot,
   type TLAssetStore,
-  type TLRecord,
   getSnapshot,
   loadSnapshot,
   Tldraw,
@@ -75,9 +74,9 @@ interface CanvasProps {
   onSaveRef?: React.MutableRefObject<(() => Promise<void>) | null>
 }
 
-// How long (ms) a locally-touched shape is protected from remote overwrites.
-// While a user is drawing, their shapes are protected. Once they commit and
-// 2s passes, remote changes can update those shapes normally.
+// How long (ms) after the last local edit before remote snapshots can be applied.
+// Incoming remote snapshots are queued while the user draws and flushed once
+// they pause — preventing in-progress strokes from being interrupted.
 const LOCAL_GUARD_MS = 2000
 
 // ── ShareRow helper ───────────────────────────────────────────────────────────
@@ -233,13 +232,13 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave 
 export default function Canvas({ boardId, readOnly = false, user = null }: CanvasProps) {
   const editorRef = useRef<Editor | null>(null)
   const isApplyingRemoteRef = useRef(false)
-  // Blocks writes until the initial Firebase load completes (prevents
-  // tldraw's own store init events from overwriting saved data)
+  // Blocks writes until the initial Firebase load completes
   const initializedRef = useRef(false)
-  // Tracks shape/record IDs recently modified by THIS user.
-  // Remote updates skip these records for LOCAL_GUARD_MS to preserve
-  // in-progress work during collaborative editing.
+  // Tracks IDs of records recently touched by THIS user (id → timestamp)
   const localTouchedRef = useRef<Map<string, number>>(new Map())
+  // Holds the latest remote snapshot that arrived while the user was drawing;
+  // flushed to the canvas by the idle-flush timer once the user pauses
+  const pendingRemoteSnapRef = useRef<Partial<TLEditorSnapshot> | null>(null)
 
   const [editorReady, setEditorReady] = useState(false)
   const writeToFirebaseRef = useRef<((snap: TLEditorSnapshot) => Promise<void>) | null>(null)
@@ -252,7 +251,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
 
   useEffect(() => { userNameRef.current = user?.name || 'Anônimo' }, [user])
 
-  // Periodically evict old entries from localTouchedRef so it doesn't grow unbounded
+  // Periodically evict old entries from localTouchedRef
   useEffect(() => {
     const timer = setInterval(() => {
       const cutoff = Date.now() - LOCAL_GUARD_MS * 5
@@ -279,70 +278,12 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     return Object.values(records).filter((r: any) => r?.typeName === 'shape').length
   }
 
-  // ── Shape-level merge (replaces full loadSnapshot for real-time updates) ──
-  //
-  // Instead of blindly replacing the entire canvas with a remote snapshot,
-  // we apply a surgical per-record merge:
-  //   • Records the local user recently touched are kept as-is (LOCAL_GUARD_MS)
-  //   • All other records are updated to match the remote version
-  //   • Shapes deleted remotely are removed locally (unless locally guarded)
-  //
-  // This means two people can draw simultaneously without erasing each other.
-  const applyRemoteMerge = useCallback((editor: Editor, remoteSnap: Partial<TLEditorSnapshot>) => {
-    const remoteStore = remoteSnap.document?.store as Record<string, TLRecord> | undefined
-    if (!remoteStore) { setSync('Online'); return }
-
-    const now = Date.now()
-    const localSnap = getSnapshot(editor.store)
-    const localStore = localSnap.document?.store as Record<string, TLRecord> | undefined ?? {}
-
-    try {
-      isApplyingRemoteRef.current = true
-
-      const toUpsert: TLRecord[] = []
-      const toRemove: string[] = []
-
-      // Update/add all remote records, skipping locally-touched ones
-      for (const record of Object.values(remoteStore)) {
-        const id = (record as any).id as string
-        const touchedAt = localTouchedRef.current.get(id)
-        if (touchedAt && now - touchedAt < LOCAL_GUARD_MS) {
-          continue // protect in-progress local edits
-        }
-        toUpsert.push(record)
-      }
-
-      // Remove records that exist locally but were deleted from remote
-      // (only shapes — never remove page/document/asset records this way)
-      for (const [id, record] of Object.entries(localStore)) {
-        if ((record as any).typeName !== 'shape') continue
-        if (remoteStore[id]) continue // still exists in remote, handled above
-        const touchedAt = localTouchedRef.current.get(id)
-        if (touchedAt && now - touchedAt < LOCAL_GUARD_MS) continue // locally created, keep
-        toRemove.push(id)
-      }
-
-      const shapesMerged = toUpsert.filter((r: any) => r.typeName === 'shape').length
-      const shapesRemoved = toRemove.length
-
-      if (toUpsert.length > 0) editor.store.put(toUpsert)
-      if (toRemove.length > 0) editor.store.remove(toRemove as any[])
-
-      console.log('[Sinapsia] applyRemoteMerge OK', { boardId, shapesMerged, shapesRemoved, totalUpserted: toUpsert.length })
-      setSync('Online')
-    } catch (err) {
-      console.error('[Sinapsia] applyRemoteMerge failed, falling back to loadSnapshot:', err)
-      try { loadSnapshot(editor.store, remoteSnap) } catch (_) {}
-      setSync('Online')
-    } finally {
-      isApplyingRemoteRef.current = false
-    }
-  }, [boardId])
-
-  // Full snapshot replace — only used for the INITIAL load (no local edits yet)
+  // ── Full snapshot replace (safe — uses tldraw's own loadSnapshot API) ─────
+  // Used for: initial board load, and real-time remote updates when the
+  // user is idle (no edits in the last LOCAL_GUARD_MS).
   const applyRemoteSnapshot = useCallback((editor: Editor, snap: Partial<TLEditorSnapshot>) => {
     const shapeCount = countShapes(snap)
-    console.log('[Sinapsia] applyRemoteSnapshot (initial load)', { boardId, shapeCount })
+    console.log('[Sinapsia] applyRemoteSnapshot', { boardId, shapeCount })
     try {
       isApplyingRemoteRef.current = true
       loadSnapshot(editor.store, snap)
@@ -355,6 +296,48 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       isApplyingRemoteRef.current = false
     }
   }, [boardId])
+
+  // ── Deferred remote merge ─────────────────────────────────────────────────
+  // When a remote update arrives via onValue:
+  //   • User is IDLE  → apply immediately with the safe loadSnapshot
+  //   • User is DRAWING → stash in pendingRemoteSnapRef; idle-flush timer
+  //     (below) applies it once the user pauses for LOCAL_GUARD_MS
+  //
+  // This strategy avoids calling editor.store.put() directly, which causes
+  // "AtomMap: key [object Object] not found" errors in tldraw v5 when used
+  // outside the framework's expected mutation paths.
+  const applyRemoteMerge = useCallback((editor: Editor, remoteSnap: Partial<TLEditorSnapshot>) => {
+    const now = Date.now()
+    const isDrawing = [...localTouchedRef.current.values()].some(ts => now - ts < LOCAL_GUARD_MS)
+
+    if (isDrawing) {
+      pendingRemoteSnapRef.current = remoteSnap
+      console.log('[Sinapsia] applyRemoteMerge: deferred — user is drawing', { boardId })
+      return
+    }
+
+    console.log('[Sinapsia] applyRemoteMerge: user idle — applying', { boardId, shapeCount: countShapes(remoteSnap) })
+    applyRemoteSnapshot(editor, remoteSnap)
+  }, [boardId, applyRemoteSnapshot])
+
+  // ── Idle-flush timer ──────────────────────────────────────────────────────
+  // Every 500ms, check if the user has paused. If yes and there is a pending
+  // remote snapshot, apply it now. This ensures remote changes always land
+  // within ~LOCAL_GUARD_MS + 500ms of the user stopping.
+  useEffect(() => {
+    if (!editorReady) return
+    const timer = setInterval(() => {
+      if (!pendingRemoteSnapRef.current || !editorRef.current) return
+      const now = Date.now()
+      const isDrawing = [...localTouchedRef.current.values()].some(ts => now - ts < LOCAL_GUARD_MS)
+      if (isDrawing) return
+      const snap = pendingRemoteSnapRef.current
+      pendingRemoteSnapRef.current = null
+      console.log('[Sinapsia] idle-flush: applying deferred remote snapshot', { boardId, shapeCount: countShapes(snap) })
+      applyRemoteSnapshot(editorRef.current!, snap)
+    }, 500)
+    return () => clearInterval(timer)
+  }, [applyRemoteSnapshot, boardId, editorReady])
 
   // ── Write to Firebase ─────────────────────────────────────────────────────
   const writeToFirebase = useCallback(async (snap: TLEditorSnapshot) => {
@@ -472,8 +455,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         if (isApplyingRemoteRef.current) return
         if (!initializedRef.current) return
 
-        // Track which records the local user just modified so the merge can
-        // protect them from being overwritten by incoming remote snapshots
+        // Track which records the local user just modified
         const now = Date.now()
         for (const record of Object.values(change.changes.added ?? {})) {
           const id = (record as any)?.id
@@ -517,15 +499,10 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
       if (!data?.document_state) { setSync('Online'); return }
-      // Skip updates we ourselves wrote — we already have the latest
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
-
       const parsed = deserializeSnap(data.document_state)
       if (!parsed) { setSync('Online'); return }
-
-      const shapeCount = countShapes(parsed)
-      console.log('[Sinapsia] onValue: received remote update, merging', { boardId, shapeCount, from: data.last_saved_by })
-      // Use shape-level merge (not full replace) so in-progress local work is preserved
+      console.log('[Sinapsia] onValue: remote update received', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
       applyRemoteMerge(editorRef.current!, parsed)
     }, (err) => { console.error('[Sinapsia] onValue error:', err); setSync('Local') })
 

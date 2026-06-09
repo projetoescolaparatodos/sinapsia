@@ -5,11 +5,12 @@ import type { SinapUser } from '@/lib/auth'
 
 interface AuthModalProps {
   onSuccess: (user: SinapUser) => void
+  subtitle?: string
 }
 
 type Step = 'phone' | 'name'
 
-export default function AuthModal({ onSuccess }: AuthModalProps) {
+export default function AuthModal({ onSuccess, subtitle }: AuthModalProps) {
   const [step, setStep] = useState<Step>('phone')
   const [phone, setPhone] = useState('')
   const [name, setName] = useState('')
@@ -105,7 +106,9 @@ export default function AuthModal({ onSuccess }: AuthModalProps) {
           {step === 'phone' ? (
             <>
               <h1 className="mt-3 text-xl font-bold text-neutral-900">Entrar no Sinapsia</h1>
-              <p className="mt-1 text-sm text-neutral-500">Sem senha. Só o número de telefone.</p>
+              <p className="mt-1 text-sm text-neutral-500">
+                {subtitle ?? 'Sem senha. Só o número de telefone.'}
+              </p>
             </>
           ) : (
             <>
