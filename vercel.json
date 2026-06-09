@@ -9,6 +9,7 @@
   ],
   "installCommand": "pnpm install",
   "buildCommand": "pnpm --filter @workspace/sinapsia build",
+  "outputDirectory": "artifacts/sinapsia/dist/public",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ],
