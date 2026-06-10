@@ -14,8 +14,8 @@ import {
   Tldraw,
 } from 'tldraw'
 import 'tldraw/tldraw.css'
-import { useLocation } from 'wouter'
-import { Check, Copy, Eye, Home, Moon, PenLine, Save, Share2, Sun, X } from 'lucide-react'
+import { useLocation } from 'wouter'47/*
+n, X } from 'lucide-react',.3
 import { db, ref, set, update, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -253,6 +253,8 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const editorRef = useRef<Editor | null>(null)
   const isApplyingRemoteRef = useRef(false)
   const initializedRef = useRef(false)
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const localTouchedRef = useRef<Map<string, number>>(new Map())
   const pendingRemoteSnapRef = useRef<Partial<TLEditorSnapshot> | null>(null)
 
@@ -263,6 +265,12 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     if (!editorRef.current) return
     editorRef.current.user.updateUserPreferences({ colorScheme: isDark ? 'dark' : 'light' })
   }, [isDark, editorReady])
+
+  // Sync readOnly prop into editor without remounting
+  useEffect(() => {
+    if (!editorRef.current || !editorReady) return
+    editorRef.current.updateInstanceState({ isReadonly: readOnly })
+  }, [readOnly, editorReady])
 
   const writeToFirebaseRef = useRef<((snap: TLEditorSnapshot) => Promise<void>) | null>(null)
   const throttledCursorRef = useRef<((x: number, y: number) => void) | null>(null)
@@ -403,15 +411,16 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   // ── Mount ─────────────────────────────────────────────────────────────────
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
-    console.log('[Sinapsia] handleMount', { boardId, readOnly, session: MY_SESSION, dbConnected: Boolean(db) })
+    initializedRef.current = false
+    console.log('[Sinapsia] handleMount', { boardId, readOnly: readOnlyRef.current, session: MY_SESSION, dbConnected: Boolean(db) })
 
-    if (readOnly) editor.updateInstanceState({ isReadonly: true })
+    if (readOnlyRef.current) editor.updateInstanceState({ isReadonly: true })
 
     if (!db) {
       initializedRef.current = true
     }
 
-    if (!readOnly) {
+    if (!readOnlyRef.current) {
       // Debounce at 1.5s — only fires on actual content changes (shapes/assets/pages),
       // not on camera pan, zoom, cursor moves, or selection changes.
       const debouncedWrite = debounce(() => {
@@ -449,7 +458,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     }
 
     throttledCursorRef.current = throttle((x: number, y: number) => {
-      if (!db || readOnly) return
+      if (!db || readOnlyRef.current) return
       set(ref(db, `cursors/${boardId}/${MY_SESSION}`), {
         x, y, color: MY_COLOR, ts: Date.now(), name: userNameRef.current,
       }).catch(() => {})
@@ -461,7 +470,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
     }, { source: 'user' })
 
     setEditorReady(true)
-  }, [applyRemoteSnapshot, boardId, readOnly])
+  }, [applyRemoteSnapshot, boardId])
 
   // ── Real-time board sync ──────────────────────────────────────────────────
   useEffect(() => {
@@ -474,7 +483,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       const data = snapshot.val()
       if (!initializedRef.current) initializedRef.current = true
       if (!data?.document_state) { setSync('Online'); return }
-      if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
+      if (!readOnlyRef.current && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
       const parsed = deserializeSnap(data.document_state)
       if (!parsed) { setSync('Online'); return }
       console.log('[Sinapsia] onValue: remote update received', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
@@ -485,7 +494,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       console.log('[Sinapsia] onValue subscription cleanup', { boardId })
       off(boardRef)
     }
-  }, [applyRemoteMerge, editorReady, boardId, readOnly])
+  }, [applyRemoteMerge, editorReady, boardId])
 
   // ── Cursor disconnect cleanup ─────────────────────────────────────────────
   useEffect(() => {
