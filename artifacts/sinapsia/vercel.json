@@ -4,7 +4,7 @@
   "buildCommand": "pnpm build",
   "outputDirectory": "dist/public",
   "rewrites": [
-    { "source": "/*", "destination": "/index.html" }
+    { "source": "/(.*)?", "destination": "/index.html" }
   ],
   "headers": [
     {
