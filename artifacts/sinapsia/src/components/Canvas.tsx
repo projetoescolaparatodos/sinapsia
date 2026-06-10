@@ -15,7 +15,9 @@ import {
 } from 'tldraw'
 import 'tldraw/tldraw.css'
 import { useLocation } from 'wouter'
-import { Check, Copy, Eye, Home, Moon, PenLine, Save, Share2, Sun, X } from 'lucide-react'
+import { Bot, Check, Copy, Eye, Home, Moon, PenLine, Save, Share2, Sun, X } from 'lucide-react'
+import ImportJsonModal from '@/components/ImportJsonModal'
+import { buildTldrawBoard } from '@/lib/tldrawBuilder'
 import { db, ref, set, update, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -123,9 +125,10 @@ interface OverlayProps {
   onManualSave: () => void
   isDark: boolean
   onThemeToggle: () => void
+  onOpenAiModal: () => void
 }
 
-function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave, isDark, onThemeToggle }: OverlayProps) {
+function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave, isDark, onThemeToggle, onOpenAiModal }: OverlayProps) {
   const [, navigate] = useLocation()
   const [showShare, setShowShare] = useState(false)
   const [copied, setCopied] = useState<'edit' | 'view' | null>(null)
@@ -165,6 +168,18 @@ function CanvasOverlay({ boardId, readOnly, sync, user, saveState, onManualSave,
             <span className="inline-block h-2 w-2 rounded-full border border-white shadow-sm" style={{ backgroundColor: MY_COLOR }} />
             {user.name}
           </span>
+        )}
+
+        {/* IA generate */}
+        {!readOnly && (
+          <button
+            onClick={onOpenAiModal}
+            className={`${btnCls} text-violet-600 dark:text-violet-400 hover:!bg-violet-50 dark:hover:!bg-violet-950/40`}
+            title="Gerar mapa com IA"
+          >
+            <Bot size={15} />
+            <span className="hidden sm:inline">IA</span>
+          </button>
         )}
 
         {/* Save */}
@@ -259,6 +274,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const pendingRemoteSnapRef = useRef<Partial<TLEditorSnapshot> | null>(null)
 
   const [editorReady, setEditorReady] = useState(false)
+  const [showAiModal, setShowAiModal] = useState(false)
   const mountCountRef = useRef(0)
 
   // Sync dark mode into tldraw's editor preferences reactively
@@ -408,6 +424,63 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       setSaveState('idle')
     }
   }, [boardId, readOnly, saveState])
+
+  // ── IA: aplica shapes gerados no canvas ─────────────────────────────────────
+  const handleAiApply = useCallback((result: {
+    shapeRecords: ReturnType<typeof buildTldrawBoard>['shapeRecords']
+    arrowRecords: ReturnType<typeof buildTldrawBoard>['arrowRecords']
+    assetRecords: ReturnType<typeof buildTldrawBoard>['assetRecords']
+    title: string
+    replaceAll?: boolean
+  }) => {
+    const editor = editorRef.current
+    if (!editor) return
+
+    setShowAiModal(false)
+
+    editor.batch(() => {
+      const currentSnap = getSnapshot(editor.store)
+      const currentStore = currentSnap.document.store as Record<string, unknown>
+
+      let baseStore: Record<string, unknown>
+      if (result.replaceAll !== false) {
+        baseStore = {}
+        for (const [key, record] of Object.entries(currentStore)) {
+          const typeName = (record as any)?.typeName
+          if (typeName && !['shape', 'asset', 'bookmark'].includes(typeName)) {
+            baseStore[key] = record
+          }
+        }
+      } else {
+        baseStore = { ...currentStore }
+      }
+
+      for (const shape of [...result.shapeRecords, ...result.arrowRecords]) {
+        baseStore[shape.id] = shape
+      }
+      for (const asset of result.assetRecords ?? []) {
+        baseStore[asset.id] = asset
+      }
+
+      isApplyingRemoteRef.current = true
+      try {
+        loadSnapshot(editor.store, {
+          ...currentSnap,
+          document: { ...currentSnap.document, store: baseStore as any },
+        })
+      } finally {
+        isApplyingRemoteRef.current = false
+      }
+
+      setTimeout(() => { editor.zoomToFit({ animation: { duration: 500 } }) }, 120)
+    })
+
+    setTimeout(() => {
+      if (editorRef.current && writeToFirebaseRef.current) {
+        writeToFirebaseRef.current(getSnapshot(editorRef.current.store))
+      }
+    }, 700)
+  }, [])
 
   // ── Mount ─────────────────────────────────────────────────────────────────
   const handleMount = useCallback((editor: Editor) => {
@@ -591,9 +664,22 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         onManualSave={handleManualSave}
         isDark={isDark}
         onThemeToggle={toggleTheme}
+        onOpenAiModal={() => setShowAiModal(true)}
       />
 
       {cursorElements}
+
+      {showAiModal && !readOnly && (
+        <ImportJsonModal
+          hasExistingContent={
+            Object.values(
+              (getSnapshot(editorRef.current!.store).document.store) as Record<string, any>
+            ).some((r) => r?.typeName === 'shape')
+          }
+          onClose={() => setShowAiModal(false)}
+          onApply={handleAiApply}
+        />
+      )}
     </div>
   )
 }
