@@ -16,7 +16,7 @@ import {
 import 'tldraw/tldraw.css'
 import { useLocation } from 'wouter'
 import { Check, Copy, Eye, Home, Moon, PenLine, Save, Share2, Sun, X } from 'lucide-react'
-import { db, ref, set, update, get, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
+import { db, ref, set, update, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
 import { useDarkMode } from '@/hooks/useDarkMode'
 
@@ -407,36 +407,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
 
     if (readOnly) editor.updateInstanceState({ isReadonly: true })
 
-    if (db) {
-      get(ref(db, `boards/${boardId}`))
-        .then(async (fbSnap) => {
-          const data = fbSnap.val()
-          const remote = deserializeSnap(data?.document_state)
-          const remoteShapeCount = countShapes(remote)
-          const local = getSnapshot(editor.store)
-          const localShapeCount = countShapes(local)
-
-          console.log('[Sinapsia] Firebase initial load result', {
-            boardId, hasRemote: Boolean(remote), remoteShapeCount, localShapeCount,
-            lastSavedBy: data?.last_saved_by, updatedAt: data?.updated_at,
-          })
-
-          if (!remote || remoteShapeCount === 0) {
-            setSync('Online')
-          } else if (!readOnly && localShapeCount > remoteShapeCount) {
-            await writeToFirebaseRef.current?.(local)
-          } else {
-            applyRemoteSnapshot(editor, remote)
-          }
-        })
-        .catch((err) => {
-          console.error('[Sinapsia] Firebase initial load failed:', err)
-          setSync('Local')
-        })
-        .finally(() => {
-          initializedRef.current = true
-        })
-    } else {
+    if (!db) {
       initializedRef.current = true
     }
 
@@ -501,6 +472,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
 
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
+      if (!initializedRef.current) initializedRef.current = true
       if (!data?.document_state) { setSync('Online'); return }
       if (!readOnly && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
       const parsed = deserializeSnap(data.document_state)
