@@ -481,6 +481,10 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   // ── Real-time board sync ──────────────────────────────────────────────────
   useEffect(() => {
     if (!editorReady || !db || !editorRef.current) return
+    // Capture the editor instance at effect-run time so all callbacks below
+    // always operate on the correct editor, even if editorRef is later replaced
+    // by a subsequent remount before this effect's cleanup runs.
+    const editor = editorRef.current
     const boardRef = ref(db, `boards/${boardId}`)
 
     console.log('[Sinapsia] onValue subscription starting', { boardId, session: MY_SESSION })
@@ -490,15 +494,10 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       const data = snapshot.val()
       if (firstFire) {
         firstFire = false
+        // On mount the editor is always empty — always load remote snapshot
+        // regardless of who last saved it (even if it was this session).
         if (!data?.document_state) {
           setSync('Online')
-          // No remote data — allow writes immediately
-          initializedRef.current = true
-          return
-        }
-        if (!readOnlyRef.current && data.last_saved_by === MY_SESSION) {
-          setSync('Online')
-          // We wrote this — trust it and allow writes immediately
           initializedRef.current = true
           return
         }
@@ -508,19 +507,19 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
           initializedRef.current = true
           return
         }
-        console.log('[Sinapsia] onValue: remote update received', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
-        applyRemoteMerge(editorRef.current!, parsed)
+        console.log('[Sinapsia] onValue: initial load', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
+        applyRemoteMerge(editor, parsed)
         // Delay enabling writes so the loadSnapshot debounce (1500ms) expires first
         setTimeout(() => { initializedRef.current = true }, 2000)
         return
       }
-      // Subsequent fires — normal collaborative updates
+      // Subsequent fires — normal collaborative updates, skip own writes
       if (!data?.document_state) { setSync('Online'); return }
       if (!readOnlyRef.current && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
       const parsed = deserializeSnap(data.document_state)
       if (!parsed) { setSync('Online'); return }
       console.log('[Sinapsia] onValue: remote update received', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
-      applyRemoteMerge(editorRef.current!, parsed)
+      applyRemoteMerge(editor, parsed)
     }, (err) => { console.error('[Sinapsia] onValue error:', err); setSync('Local') })
 
     return () => {
