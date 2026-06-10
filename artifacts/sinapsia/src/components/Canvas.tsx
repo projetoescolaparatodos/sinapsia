@@ -565,10 +565,9 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   return (
     <div className="fixed inset-0">
       <Tldraw
-        autoFocus
+        key={`tldraw-${boardId}`}
         onMount={handleMount}
         assets={assetStore}
-        persistenceKey={`sinapsia-${boardId}`}
         darkMode={isDark}
       />
 
