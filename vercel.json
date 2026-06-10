@@ -1,6 +1,7 @@
 {
   "version": 2,
-  "installCommand": "pnpm install --frozen-lockfile",
+  "framework": "vite",
+  "installCommand": "pnpm install --no-frozen-lockfile",
   "buildCommand": "pnpm --filter @workspace/sinapsia build",
   "outputDirectory": "artifacts/sinapsia/dist/public",
   "rewrites": [
