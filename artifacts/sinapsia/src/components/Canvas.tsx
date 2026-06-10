@@ -259,6 +259,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const pendingRemoteSnapRef = useRef<Partial<TLEditorSnapshot> | null>(null)
 
   const [editorReady, setEditorReady] = useState(false)
+  const mountCountRef = useRef(0)
 
   // Sync dark mode into tldraw's editor preferences reactively
   useEffect(() => {
@@ -412,6 +413,8 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
   const handleMount = useCallback((editor: Editor) => {
     editorRef.current = editor
     initializedRef.current = false
+    mountCountRef.current += 1
+    setEditorReady(false)
     console.log('[Sinapsia] handleMount', { boardId, readOnly: readOnlyRef.current, session: MY_SESSION, dbConnected: Boolean(db) })
 
     if (readOnlyRef.current) editor.updateInstanceState({ isReadonly: true })
@@ -469,7 +472,10 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       if (pt) throttledCursorRef.current?.(pt.x, pt.y)
     }, { source: 'user' })
 
-    setEditorReady(true)
+    const thisMount = mountCountRef.current
+    setTimeout(() => {
+      if (mountCountRef.current === thisMount) setEditorReady(true)
+    }, 0)
   }, [applyRemoteSnapshot, boardId])
 
   // ── Real-time board sync ──────────────────────────────────────────────────
@@ -479,9 +485,36 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
 
     console.log('[Sinapsia] onValue subscription starting', { boardId, session: MY_SESSION })
 
+    let firstFire = true
     onValue(boardRef, (snapshot) => {
       const data = snapshot.val()
-      if (!initializedRef.current) initializedRef.current = true
+      if (firstFire) {
+        firstFire = false
+        if (!data?.document_state) {
+          setSync('Online')
+          // No remote data — allow writes immediately
+          initializedRef.current = true
+          return
+        }
+        if (!readOnlyRef.current && data.last_saved_by === MY_SESSION) {
+          setSync('Online')
+          // We wrote this — trust it and allow writes immediately
+          initializedRef.current = true
+          return
+        }
+        const parsed = deserializeSnap(data.document_state)
+        if (!parsed) {
+          setSync('Online')
+          initializedRef.current = true
+          return
+        }
+        console.log('[Sinapsia] onValue: remote update received', { boardId, shapeCount: countShapes(parsed), from: data.last_saved_by })
+        applyRemoteMerge(editorRef.current!, parsed)
+        // Delay enabling writes so the loadSnapshot debounce (1500ms) expires first
+        setTimeout(() => { initializedRef.current = true }, 2000)
+        return
+      }
+      // Subsequent fires — normal collaborative updates
       if (!data?.document_state) { setSync('Online'); return }
       if (!readOnlyRef.current && data.last_saved_by === MY_SESSION) { setSync('Online'); return }
       const parsed = deserializeSnap(data.document_state)
