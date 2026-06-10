@@ -14,8 +14,8 @@ import {
   Tldraw,
 } from 'tldraw'
 import 'tldraw/tldraw.css'
-import { useLocation } from 'wouter'47/*
-n, X } from 'lucide-react',.3
+import { useLocation } from 'wouter'
+import { Check, Copy, Eye, Home, Moon, PenLine, Save, Share2, Sun, X } from 'lucide-react'
 import { db, ref, set, update, onValue, off, onDisconnect, serverTimestamp } from '@/lib/firebase'
 import type { SinapUser } from '@/lib/auth'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -50,7 +50,7 @@ async function uploadToCloudinary(file: File): Promise<string> {
 const assetStore: TLAssetStore = {
   async upload(_asset, file) {
     const src = await uploadToCloudinary(file)
-    return { src }
+    return src
   },
   resolve(asset) { return asset.props.src ?? null },
 }
@@ -547,7 +547,7 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
         key={`tldraw-${boardId}`}
         onMount={handleMount}
         assets={assetStore}
-        darkMode={isDark}
+        inferDarkMode
       />
 
       <CanvasOverlay
