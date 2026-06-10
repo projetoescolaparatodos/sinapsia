@@ -489,8 +489,6 @@ export default function Canvas({ boardId, readOnly = false, user = null }: Canva
       if (pt) throttledCursorRef.current?.(pt.x, pt.y)
     }, { source: 'user' })
 
-    editor.store.listen(() => setTick((n) => n + 1), { source: 'all' })
-
     setEditorReady(true)
   }, [applyRemoteSnapshot, boardId, readOnly])
 
